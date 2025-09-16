@@ -1,6 +1,12 @@
 import fitz
 import re
 import uuid
+from typing import List, Dict
+from langchain.text_splitter import RecursiveCharacterTextSplitter
+from pdf2image import convert_from_path
+import pytesseract
+import tempfile
+from PIL import Image
 
 # Patterns for repetitive headers/footers you don’t want
 FOOTER_PATTERNS = [
@@ -14,52 +20,69 @@ def is_footer_or_header(text: str) -> bool:
     return any(re.search(p, text) for p in FOOTER_PATTERNS)
 
 
-def extract_pages_with_lines(pdf_path: str):
-    """
-    Extract text by page, keeping line numbers and page numbers,
-    but removing common headers/footers.
-    """
+def extract_pdf_text(pdf_path: str) -> str:
+    """Try text extraction with PyMuPDF; fallback to OCR if too little text is extracted."""
     doc = fitz.open(pdf_path)
-    pages = []
+    full_text = []
 
     for i, page in enumerate(doc):
         raw_text = page.get_text("text")
-        lines = []
-        for raw_line in raw_text.splitlines():
-            text = raw_line.strip()
+        if raw_text:
+            full_text.append(raw_text)
 
-            # Skip empty lines
-            if not text:
-                continue
+    text = "\n".join(full_text)
 
-            # Skip headers/footers
-            if is_footer_or_header(text):
-                continue
+    # If very little text, try OCR
+    if len(text.strip()) < 200:  # heuristic: adjust threshold as needed
+        print("⚠️ Very little text extracted, running OCR fallback...")
+        text = perform_ocr(pdf_path)
 
-            # Skip standalone page numbers (small integers alone)
-            if text.isdigit() and len(text) < 4:
-                continue
+    return text
 
-            # Try to capture line numbers at start
-            m = re.match(r"^\s*(\d{1,3})\s+(.*)$", raw_line)
-            if m:
-                line_no = int(m.group(1))
-                text = m.group(2).strip()
-            else:
-                line_no = None
 
-            if text:
-                lines.append({
-                    "page": i + 1,         # 1-based page index
-                    "line_no": line_no,    # can be None
-                    "text": text
-                })
+def perform_ocr(pdf_path: str) -> str:
+    """Convert PDF to images and extract text with OCR."""
+    text = ""
+    with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as temp_pdf:
+        temp_pdf.write(open(pdf_path, "rb").read())
+        temp_pdf_path = temp_pdf.name
 
-        pages.append({
-            "page_num": i + 1,
-            "lines": lines
+    images = convert_from_path(temp_pdf_path, dpi=300)
+    for image in images:
+        text += pytesseract.image_to_string(image)
+    return text
+
+
+def clean_text(text: str) -> str:
+    """Remove known footers, headers, and junk lines."""
+    cleaned_lines = []
+    for line in text.splitlines():
+        t = line.strip()
+        if not t:
+            continue
+        if is_footer_or_header(t):
+            continue
+        if t.isdigit() and len(t) < 4:  # standalone page numbers
+            continue
+        cleaned_lines.append(t)
+    return "\n".join(cleaned_lines)
+
+
+def chunk_text(text: str, chunk_size=1000, chunk_overlap=200) -> List[Dict]:
+    """Chunk cleaned text with LangChain RecursiveCharacterTextSplitter, keep metadata."""
+    splitter = RecursiveCharacterTextSplitter(
+        chunk_size=chunk_size,
+        chunk_overlap=chunk_overlap
+    )
+    chunks = []
+    for idx, chunk in enumerate(splitter.split_text(text)):
+        chunks.append({
+            "chunk_id": str(uuid.uuid4()),
+            "chunk_index": idx,
+            "clean_text": chunk,
+            "type": detect_block_type(chunk)
         })
-    return pages
+    return chunks
 
 
 def detect_block_type(text_block: str) -> str:
@@ -75,51 +98,129 @@ def detect_block_type(text_block: str) -> str:
     return "body"
 
 
-def chunk_by_line_ranges(pages, lines_per_chunk=10):
+def extract_qna_chunks(text: str) -> List[Dict]:
     """
-    Group lines into chunks of N lines, preserving metadata.
-    Returns chunks with both raw and cleaned text.
-    Improved to try to respect sentence boundaries when possible.
+    Extract Q&A based chunks from deposition text.
+    Each chunk contains 3 Q&A pairs: previous, current, and next for context.
     """
     chunks = []
-    for p in pages:
-        # Only use lines with numbers (skip headers, etc.)
-        lines = [l for l in p["lines"] if l["line_no"] is not None]
-        if not lines:
+    lines = text.split('\n')
+    
+    # Find all Q&A pairs
+    qna_pairs = []
+    current_q = ""
+    current_a = ""
+    current_q_line = None
+    current_a_line = None
+    mode = None  # 'q' or 'a' or None
+    
+    for line_num, line in enumerate(lines):
+        line = line.strip()
+        if not line:
             continue
-
-        i = 0
-        while i < len(lines):
-            # Start with target chunk size
-            end_idx = min(i + lines_per_chunk, len(lines))
-            window = lines[i:end_idx]
             
-            # If we're not at the end of lines, try to extend to complete sentences
-            if end_idx < len(lines):
-                # Look ahead up to 5 more lines to find sentence ending
-                for j in range(end_idx, min(end_idx + 5, len(lines))):
-                    line_text = lines[j]["text"]
-                    if line_text.endswith(('.', '!', '?', '"')) or line_text.startswith(('Q.', 'A.')):
-                        end_idx = j + 1
-                        break
-                window = lines[i:end_idx]
+        # Check if this line is just "Q."
+        if line == 'Q.':
+            # Save previous Q&A pair if we have both
+            if current_q.strip() and current_a.strip():
+                qna_pairs.append({
+                    'q': current_q.strip(),
+                    'a': current_a.strip(),
+                    'q_line': current_q_line,
+                    'a_line': current_a_line,
+                    'line_range': (current_q_line, current_a_line)
+                })
             
-            raw_text_block = "\n".join([f"{l['line_no']}: {l['text']}" for l in window])
-
-            # Remove leading line numbers for clean text
-            clean_text_block = re.sub(r"^\d+:\s*", "", raw_text_block, flags=re.MULTILINE)
-
-            chunk = {
-                "chunk_id": str(uuid.uuid4()),
-                "page": p["page_num"],
-                "start_line": window[0]["line_no"],
-                "end_line": window[-1]["line_no"],
-                "raw_text": raw_text_block,
-                "clean_text": clean_text_block,
-                "type": detect_block_type(clean_text_block)
-            }
-            chunks.append(chunk)
+            # Start new question
+            current_q = ""
+            current_a = ""
+            current_q_line = line_num + 1
+            current_a_line = None
+            mode = 'q'
             
-            # Move to next chunk
-            i = end_idx
+        # Check if this line is just "A."
+        elif line == 'A.':
+            mode = 'a'
+            current_a_line = line_num + 1
+            
+        # Skip footer patterns and other junk
+        elif any(re.search(p, line) for p in [r'\(\d{3}\) \d{3}-\d{4}', r'[A-F0-9-]{36}', r'MR\. \w+:', r'MS\. \w+:', r'Objection\.']):
+            continue
+            
+        # Add content to current question or answer
+        elif mode == 'q':
+            if current_q:
+                current_q += " " + line
+            else:
+                current_q = line
+        elif mode == 'a':
+            if current_a:
+                current_a += " " + line
+            else:
+                current_a = line
+            current_a_line = line_num + 1
+    
+    # Don't forget the last Q&A pair
+    if current_q and current_a:
+        qna_pairs.append({
+            'q': current_q,
+            'a': current_a,
+            'q_line': current_q_line,
+            'a_line': current_a_line,
+            'line_range': (current_q_line, current_a_line)
+        })
+    
+    print(f"  - Found {len(qna_pairs)} Q&A pairs")
+    
+    # Create chunks with 3 Q&A context (previous, current, next)
+    for i, qna in enumerate(qna_pairs):
+        chunk_qnas = []
+        start_line = qna['q_line']
+        end_line = qna['a_line']
+        
+        # Add previous Q&A for context (if exists)
+        if i > 0:
+            prev_qna = qna_pairs[i-1]
+            chunk_qnas.append(f"Q. {prev_qna['q']}")
+            chunk_qnas.append(f"A. {prev_qna['a']}")
+            start_line = prev_qna['q_line']
+        
+        # Add current Q&A
+        chunk_qnas.append(f"Q. {qna['q']}")
+        chunk_qnas.append(f"A. {qna['a']}")
+        
+        # Add next Q&A for context (if exists)
+        if i < len(qna_pairs) - 1:
+            next_qna = qna_pairs[i+1]
+            chunk_qnas.append(f"Q. {next_qna['q']}")
+            chunk_qnas.append(f"A. {next_qna['a']}")
+            end_line = next_qna['a_line']
+        
+        chunk_text = "\n\n".join(chunk_qnas)
+        
+        chunk = {
+            "chunk_id": str(uuid.uuid4()),
+            "chunk_index": i,
+            "clean_text": chunk_text,
+            "type": "testimony",
+            "qna_count": len(chunk_qnas) // 2,  # Number of Q&A pairs
+            "central_qna": i,  # Index of the central Q&A pair
+            "start_line": start_line,
+            "end_line": end_line,
+            "context": "3qna" if i > 0 and i < len(qna_pairs) - 1 else "partial"
+        }
+        chunks.append(chunk)
+    
     return chunks
+
+def process_pdf(pdf_path: str, chunk_size=1000, overlap=200, use_qna_chunking=True):
+    """Full pipeline: extract → clean → chunk."""
+    raw_text = extract_pdf_text(pdf_path)
+    cleaned = clean_text(raw_text)
+    
+    if use_qna_chunking:
+        print("  - Using Q&A-aware chunking for deposition")
+        return extract_qna_chunks(cleaned)
+    else:
+        print("  - Using standard text chunking")
+        return chunk_text(cleaned, chunk_size, overlap)

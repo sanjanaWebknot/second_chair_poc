@@ -10,7 +10,7 @@ import sys
 # Fix HuggingFace tokenizers parallelism warning
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
-from pdf_utils import extract_pages_with_lines, chunk_by_line_ranges
+from pdf_utils import process_pdf
 from embeddings import get_sentence_transformer
 from chroma_utils import (
     create_chroma_client,
@@ -23,11 +23,23 @@ from claim_checker import check_claim_with_ollama
 PDF_FILE = "Deposition_Joseph_Nadeau.pdf"
 CHROMA_PERSIST_DIR = "./chroma_db_second_chair"
 COLLECTION_NAME = "second_chair_depositions"
-LINES_PER_CHUNK = 30  # Increased chunk size for better context
+CHUNK_SIZE = 1000  # Target chunk size in characters
+CHUNK_OVERLAP = 100  # Overlap between chunks
 
-def setup_database():
+def clear_database():
+    """Clear the existing ChromaDB database."""
+    import shutil
+    if os.path.exists(CHROMA_PERSIST_DIR):
+        print(f"🗑️  Removing existing database at {CHROMA_PERSIST_DIR}")
+        shutil.rmtree(CHROMA_PERSIST_DIR)
+        print("✅ Database cleared!")
+
+def setup_database(force_rebuild=False):
     """Extract PDF, chunk it, and store in Chroma database."""
     print("🔍 Setting up database...")
+    
+    if force_rebuild:
+        clear_database()
     
     if not os.path.exists(PDF_FILE):
         print(f"❌ Error: PDF file '{PDF_FILE}' not found!")
@@ -35,14 +47,9 @@ def setup_database():
     
     print(f"📄 Processing {PDF_FILE}...")
     
-    # Extract pages
-    print("  - Extracting pages...")
-    pages = extract_pages_with_lines(PDF_FILE)
-    print(f"    Found {len(pages)} pages")
-    
-    # Create chunks
-    print(f"  - Creating chunks ({LINES_PER_CHUNK} lines each)...")
-    chunks = chunk_by_line_ranges(pages, lines_per_chunk=LINES_PER_CHUNK)
+    # Extract and process PDF directly into chunks
+    print("  - Processing PDF and creating chunks...")
+    chunks = process_pdf(PDF_FILE, chunk_size=CHUNK_SIZE, overlap=CHUNK_OVERLAP)
     print(f"    Created {len(chunks)} chunks")
     
     # Calculate chunk statistics
@@ -50,19 +57,53 @@ def setup_database():
     avg_length = sum(chunk_lengths) / len(chunk_lengths) if chunk_lengths else 0
     print(f"    Average chunk length: {avg_length:.0f} characters")
     
+    # Show what's being embedded (first few chunks)
+    print(f"\n📋 SHOWING FIRST 5 CHUNKS TO BE EMBEDDED:")
+    print("=" * 80)
+    for i, chunk in enumerate(chunks[:5]):
+        print(f"\n--- CHUNK {i+1} ---")
+        print(f"Page: {chunk.get('page')}, Lines: {chunk.get('start_line')}-{chunk.get('end_line')}")
+        print(f"Type: {chunk.get('type')}")
+        print(f"Length: {len(chunk.get('clean_text', ''))} chars")
+        print("Content:")
+        print(f"'{chunk.get('clean_text', '')[:300]}{'...' if len(chunk.get('clean_text', '')) > 300 else ''}")
+    
+    print("=" * 80)
+    
+    # Ask user if they want to see all chunks
+    response = input(f"\n🤔 Want to see ALL {len(chunks)} chunks? (y/N): ").strip().lower()
+    if response in ['y', 'yes']:
+        print(f"\n📋 ALL {len(chunks)} CHUNKS:")
+        print("=" * 80)
+        for i, chunk in enumerate(chunks):
+            print(f"\n--- CHUNK {i+1} ---")
+            print(f"Page: {chunk.get('page')}, Lines: {chunk.get('start_line')}-{chunk.get('end_line')}")
+            print(f"Type: {chunk.get('type')}")
+            print(f"Length: {len(chunk.get('clean_text', ''))} chars")
+            print("Content:")
+            print(f"'{chunk.get('clean_text', '')}'")
+        print("=" * 80)
+    
     # Load embedding model
     print("  - Loading embedding model...")
     embedder = get_sentence_transformer("all-MiniLM-L6-v2")
     
     # Create Chroma client and store chunks
     print("  - Storing in Chroma database...")
-    chroma_client = create_chroma_client(CHROMA_PERSIST_DIR)
-    upsert_chunks_to_chroma(chroma_client, COLLECTION_NAME, chunks, embedder, PDF_FILE)
+    try:
+        chroma_client = create_chroma_client(CHROMA_PERSIST_DIR)
+        upsert_chunks_to_chroma(chroma_client, COLLECTION_NAME, chunks, embedder, PDF_FILE, verbose=True)
+    except Exception as e:
+        print(f"❌ Database error: {e}")
+        print("🔄 Clearing database and retrying...")
+        clear_database()
+        chroma_client = create_chroma_client(CHROMA_PERSIST_DIR)
+        upsert_chunks_to_chroma(chroma_client, COLLECTION_NAME, chunks, embedder, PDF_FILE, verbose=True)
     
     print("✅ Database setup complete!")
     return chroma_client, embedder
 
-def check_claim(chroma_client, embedder, statement, top_k=5, model="llama3.1"):
+def check_claim(chroma_client, embedder, statement, top_k=5, model="phi3:mini"):
     """Check a claim against the database and get Ollama's verdict."""
     print(f"\n🔍 Checking claim: '{statement}'")
     print(f"  - Searching for top {top_k} relevant chunks...")
@@ -78,7 +119,9 @@ def check_claim(chroma_client, embedder, statement, top_k=5, model="llama3.1"):
         relevance = 1 - distance
         page = hit['metadata'].get('page')
         lines = f"{hit['metadata'].get('start_line')}-{hit['metadata'].get('end_line')}"
-        print(f"    {i+1}. Page {page}, Lines {lines} (relevance: {relevance:.3f})")
+        qna_count = hit['metadata'].get('qna_count', 1)
+        context = hit['metadata'].get('context', 'unknown')
+        print(f"    {i+1}. Page {page}, Lines {lines} ({qna_count} Q&A pairs, context: {context}, relevance: {relevance:.3f})")
     
     # Send to Ollama
     print(f"\n🤖 Analyzing with Ollama ({model})...")
@@ -132,7 +175,7 @@ def main():
     
     # Interactive loop
     print("\n🎯 Ready to check claims!")
-    print("Type 'quit' or 'exit' to stop, 'setup' to recreate database")
+    print("Commands: 'quit'/'exit' to stop, 'setup' to rebuild database, 'clear' to clear database")
     
     while True:
         try:
@@ -144,9 +187,14 @@ def main():
                 break
             
             if statement.lower() == 'setup':
-                result = setup_database()
+                result = setup_database(force_rebuild=True)
                 if result:
                     chroma_client, embedder = result
+                continue
+            
+            if statement.lower() == 'clear':
+                clear_database()
+                print("🔄 Database cleared. Type 'setup' to rebuild.")
                 continue
             
             if not statement:
@@ -160,8 +208,8 @@ def main():
             except ValueError:
                 top_k = 5
             
-            model = input(f"🤖 Ollama model (default: llama3.1): ").strip()
-            model = model if model else "llama3.1"
+            model = input(f"🤖 Ollama model (default: phi3:mini): ").strip()
+            model = model if model else "phi3:mini"
             
             # Check the claim
             check_claim(chroma_client, embedder, statement, top_k, model)

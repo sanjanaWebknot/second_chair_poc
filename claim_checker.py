@@ -8,7 +8,7 @@ def check_ollama_available(model):
         result = subprocess.run(
             ["ollama", "list"],
             capture_output=True,
-            timeout=10
+            timeout=300
         )
         if result.returncode != 0:
             return False, "Ollama is not running"
@@ -86,7 +86,7 @@ Valid verdict values: SUPPORT, REFUTE, NOT_FOUND
             ["ollama", "run", model],
             input=prompt.encode("utf-8"),
             capture_output=True,
-            timeout=120  # Increased timeout for larger contexts
+            timeout=500  # Increased timeout for larger contexts
         )
         
         if result.returncode != 0:
