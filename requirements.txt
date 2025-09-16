@@ -1,0 +1,5 @@
+streamlit
+PyMuPDF
+sentence-transformers
+chromadb
+faiss-cpu

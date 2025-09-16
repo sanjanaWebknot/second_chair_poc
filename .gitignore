@@ -1,0 +1,15 @@
+# Virtual env
+venv/
+# Chroma DB
+chroma_db_second_chair/
+# Large files
+*.pdf
+*.docx
+*.xlsx
+*.zip
+*.tar.gz
+# Python cache
+__pycache__/
+*.pyc
+# Streamlit state
+.streamlit/
