@@ -34,7 +34,7 @@ def extract_pdf_text(pdf_path: str) -> str:
 
     # If very little text, try OCR
     if len(text.strip()) < 200:  # heuristic: adjust threshold as needed
-        print("⚠️ Very little text extracted, running OCR fallback...")
+        print("Very little text extracted, running OCR fallback...")
         text = perform_ocr(pdf_path)
 
     return text

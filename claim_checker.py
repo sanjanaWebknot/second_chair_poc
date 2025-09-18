@@ -17,7 +17,7 @@ def check_ollama_available(model):
         output = result.stdout.decode('utf-8')
         if model not in output:
             available_models = []
-            for line in output.split('\n')[1:]:  # Skip header
+            for line in output.split('\n')[1:]:  
                 if line.strip():
                     model_name = line.split()[0]
                     if model_name != "NAME":  # Skip header
@@ -43,9 +43,8 @@ def check_claim_with_ollama(claim, hits, model="llama3.1"):
             "explanation": message
         }
     
-    # Build evidence context with better formatting
     evidence_sections = []
-    for i, h in enumerate(hits[:10]):  # Limit to top 10 for context length
+    for i, h in enumerate(hits[:10]): 
         section = f"""=== Evidence {i+1} ===
 Location: Page {h['metadata'].get('page')}, Lines {h['metadata'].get('start_line')}-{h['metadata'].get('end_line')}
 Relevance Score: {1 - h.get('distance', 0):.3f}
@@ -98,11 +97,27 @@ Valid verdict values: SUPPORT, REFUTE, NOT_FOUND
 
         raw = result.stdout.decode("utf-8").strip()
         
+        # Clean the raw response to remove control characters and fix common issues
+        cleaned_raw = re.sub(r'[\x00-\x1f\x7f-\x9f]', '', raw)  # Remove control characters
+        cleaned_raw = cleaned_raw.replace('\n', ' ').replace('\r', ' ')  # Replace newlines
+        
+        # Debug: print what we got from the model
+        print(f"Raw model response: {cleaned_raw[:200]}{'...' if len(cleaned_raw) > 200 else ''}")
+        
         # Try to extract JSON from response (sometimes models add extra text)
-        json_match = re.search(r'\{.*\}', raw, re.DOTALL)
+        json_match = re.search(r'\{.*\}', cleaned_raw, re.DOTALL)
         if json_match:
             json_str = json_match.group(0)
-            parsed = json.loads(json_str)
+            try:
+                parsed = json.loads(json_str)
+            except json.JSONDecodeError as e:
+                print(f"JSON parsing error: {e}")
+                print(f"Problematic JSON: {json_str[:300]}...")
+                return {
+                    "verdict": "ERROR",
+                    "confidence": 0,
+                    "explanation": f"JSON parsing failed: {str(e)}"
+                }
             
             # Validate and clean the response
             verdict = parsed.get("verdict", "UNKNOWN").upper()

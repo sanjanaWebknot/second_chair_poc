@@ -7,15 +7,15 @@ def create_chroma_client(persist_directory):
 
 def upsert_chunks_to_chroma(chroma_client, collection_name, chunks, embedder, source_file, verbose=True):
     if verbose:
-        print(f"    📊 Preparing to embed {len(chunks)} chunks...")
+        print(f"    Preparing to embed {len(chunks)} chunks...")
     
     if collection_name in [c.name for c in chroma_client.list_collections()]:
         if verbose:
-            print(f"    🔄 Using existing collection '{collection_name}'")
+            print(f"    Using existing collection '{collection_name}'")
         collection = chroma_client.get_collection(name=collection_name)
     else:
         if verbose:
-            print(f"    🆕 Creating new collection '{collection_name}'")
+            print(f"    Creating new collection '{collection_name}'")
         collection = chroma_client.create_collection(
             name=collection_name,
             metadata={"source": "second_chair_poc"}
@@ -40,16 +40,16 @@ def upsert_chunks_to_chroma(chroma_client, collection_name, chunks, embedder, so
     documents = [c.get("clean_text") or c.get("raw_text") for c in chunks]
     
     if verbose:
-        print(f"    🔤 Sample documents being embedded:")
+        print(f"    Sample documents being embedded:")
         for i, doc in enumerate(documents[:3]):
             print(f"      Doc {i+1}: '{doc[:100]}{'...' if len(doc) > 100 else ''}'")
 
     if verbose:
-        print(f"    🤖 Generating embeddings for {len(documents)} documents...")
+        print(f"    Generating embeddings for {len(documents)} documents...")
     embeddings = embed_texts(embedder, documents, verbose=verbose)
 
     if verbose:
-        print(f"    💾 Storing {len(embeddings)} embeddings in ChromaDB...")
+        print(f"    Storing {len(embeddings)} embeddings in ChromaDB...")
     
     try:
         collection.add(
@@ -59,10 +59,10 @@ def upsert_chunks_to_chroma(chroma_client, collection_name, chunks, embedder, so
             embeddings=embeddings
         )
         if verbose:
-            print(f"    ✅ Successfully stored all chunks!")
+            print(f"    Successfully stored all chunks!")
     except Exception as e:
         if verbose:
-            print(f"    ❌ Error storing chunks: {e}")
+            print(f"    Error storing chunks: {e}")
         raise
     
     return collection
