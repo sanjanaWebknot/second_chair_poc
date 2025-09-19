@@ -50,13 +50,14 @@ Location: Page {h['metadata'].get('page')}, Lines {h['metadata'].get('start_line
 Relevance Score: {1 - h.get('distance', 0):.3f}
 
 {h['document']}
+
 """
         evidence_sections.append(section)
     
     context_text = "\n".join(evidence_sections)
     
     # Enhanced prompt with better instructions
-    prompt = f"""You are an expert legal fact-checker analyzing deposition testimony.
+    prompt = f"""You are an expert legal fact-checker analyzing deposition testimony with advanced date and number matching capabilities.
 
 CLAIM TO VERIFY:
 "{claim}"
@@ -64,21 +65,50 @@ CLAIM TO VERIFY:
 AVAILABLE EVIDENCE:
 {context_text}
 
-INSTRUCTIONS:
-1. Carefully read through all evidence sections
-2. Determine if the evidence SUPPORTS, REFUTES, or provides NO CLEAR ANSWER to the claim
-3. Consider the context and exact wording in depositions
-4. Rate your confidence from 0-100 based on how clear the evidence is
+CRITICAL INSTRUCTIONS:
+
+1. SEMANTIC DATE/NUMBER MATCHING RULES:
+   • Treat equivalent date/number formats as IDENTICAL:
+     - "'65" = "1965" = "65" (when referring to years)
+     - "late 60s" = "late 60's" = "late sixties" = "1960s" = "'67" = "'68" = "'69"
+     - "early 70s" = "early seventies" = "'70" = "'71" = "'72" = "1970s"  
+     - "mid 80s" = "middle eighties" = "'84" = "'85" = "'86" = "1980s"
+     - "12th Aug 2025" = "12/08/2025" = "August 12, 2025" = "Aug 12, 2025"
+     - "first" = "1st", "second" = "2nd", "twenty-five" = "25"
+   
+   • Context-aware year interpretation:
+     - In legal/historical contexts, assume 1900s for 2-digit years unless context suggests otherwise
+     - "'65" in deposition likely means "1965", not "2065" or age "65"
+
+2. ANALYSIS PROCESS:
+   • Step 1: Identify all dates/numbers in both claim and evidence
+   • Step 2: Apply semantic matching rules to normalize formats mentally
+   • Step 3: Compare normalized versions for factual alignment
+   • Step 4: Determine SUPPORT/REFUTE/NOT_FOUND based on semantic content
+
+3. VERDICT CRITERIA:
+   • SUPPORT: Evidence clearly confirms the claim (considering format equivalence)
+   • REFUTE: Evidence clearly contradicts the claim (considering format equivalence)
+   • NOT_FOUND: No relevant evidence or evidence is ambiguous/insufficient
+
+4. CONFIDENCE SCORING:
+   • 90-100: Very clear evidence with exact semantic match
+   • 70-89: Strong evidence with minor format differences (now resolved by rules)
+   • 50-69: Moderate evidence, some ambiguity remains
+   • 30-49: Weak evidence, significant uncertainty
+   • 0-29: Very unclear or conflicting evidence
 
 RESPONSE FORMAT (respond with valid JSON only):
 {{
   "verdict": "SUPPORT",
   "confidence": 85,
-  "explanation": "The evidence clearly shows..."
+  "explanation": "The evidence clearly shows... [Note any format conversions made: e.g., 'Converting late 60s in claim to match '67 in evidence']"
 }}
 
 Valid verdict values: SUPPORT, REFUTE, NOT_FOUND
-"""
+
+Remember: Focus on SEMANTIC MEANING, not exact text matching. Different date/number formats can represent the same factual information."""
+
 
     try:
         result = subprocess.run(
