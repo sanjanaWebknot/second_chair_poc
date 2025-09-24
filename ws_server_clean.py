@@ -356,7 +356,7 @@ def regenerate_pdf(pairs: List[Dict[str, Any]]):
     
     c.save()
 
-async def process_pair_with_semaphore(semaphore: asyncio.Semaphore, pair: Dict[str, Any], results_buffer: OrderedResultsBuffer):
+async def process_pair_with_semaphore(semaphore: asyncio.Semaphore, pair: Dict[str, Any], results_buffer: OrderedResultsBuffer, buffer: QAPairBuffer):
     """Process one Q&A pair with semaphore control for parallel processing."""
     async with semaphore:  # Limit concurrent LLM calls
         start_time = time.time()
@@ -493,7 +493,7 @@ async def background_fact_checker(buffer: QAPairBuffer, results_buffer: OrderedR
                 if len(active_tasks) < MAX_CONCURRENT_TASKS:
                     buffer.mark_processing(pair["id"])
                     task = asyncio.create_task(
-                        process_pair_with_semaphore(semaphore, pair, results_buffer)
+                        process_pair_with_semaphore(semaphore, pair, results_buffer, buffer)
                     )
                     active_tasks.add(task)
                     task.add_done_callback(lambda t: active_tasks.discard(t))
