@@ -49,9 +49,15 @@ CRITICAL INSTRUCTIONS:
    • 30-49: Weak evidence, significant uncertainty
    • 0-29: Very unclear or conflicting evidence
 
+5. OUTPUT FORMAT:
+   • You MUST respond with ONLY the JSON object as specified below
+   • Do NOT include any explanatory text before or after the JSON
+   • Do NOT wrap the JSON in code blocks or markdown
+   • Do NOT add any commentary or analysis outside the JSON
+
 {format_instructions}
 
-Remember: Focus on SEMANTIC MEANING, not exact text matching. Different date/number formats can represent the same factual information."""
+Remember: Focus on SEMANTIC MEANING, not exact text matching. Different date/number formats can represent the same factual information. Respond with ONLY the JSON object."""
 
     return PromptTemplate(
         template=template,
@@ -114,6 +120,14 @@ def check_claim_with_ollama_chain(claim, hits, model="llama3.1"):
     context_text = "\n".join(evidence_sections)
     
     try:
+        # Check if OllamaLLM is available
+        if OllamaLLM is None:
+            return ClaimCheckResponse(
+                verdict="ERROR",
+                confidence=0,
+                explanation="OllamaLLM not available. Please install langchain-ollama package."
+            )
+        
         # Initialize Ollama LLM
         llm = OllamaLLM(model=model)
         
@@ -136,10 +150,30 @@ def check_claim_with_ollama_chain(claim, hits, model="llama3.1"):
         return result
         
     except Exception as e:
+        # Enhanced error handling for LangChain chain
+        error_msg = str(e)
+        print(f"Chain processing error: {error_msg}")
+        
+        # If the error is related to parsing, try to extract JSON from the error message
+        if "parsing" in error_msg.lower() or "json" in error_msg.lower():
+            # Try to extract JSON from the error message itself
+            json_match = re.search(r'\{.*\}', error_msg, re.DOTALL)
+            if json_match:
+                try:
+                    json_str = json_match.group(0)
+                    parsed_json = json.loads(json_str)
+                    return ClaimCheckResponse(
+                        verdict=parsed_json.get("verdict", "UNKNOWN"),
+                        confidence=int(parsed_json.get("confidence", 50)),
+                        explanation=parsed_json.get("explanation", "No explanation provided")
+                    )
+                except (json.JSONDecodeError, ValueError):
+                    pass
+        
         return ClaimCheckResponse(
             verdict="ERROR",
             confidence=0,
-            explanation=f"Chain processing error: {str(e)}"
+            explanation=f"Chain processing error: {error_msg}"
         )
 
 def check_claim_with_ollama(claim, hits, model="llama3.1"):
@@ -215,9 +249,15 @@ def check_claim_with_ollama(claim, hits, model="llama3.1"):
     • 30-49: Weak evidence, significant uncertainty
     • 0-29: Very unclear or conflicting evidence
 
+    5. OUTPUT FORMAT:
+    • You MUST respond with ONLY the JSON object as specified below
+    • Do NOT include any explanatory text before or after the JSON
+    • Do NOT wrap the JSON in code blocks or markdown
+    • Do NOT add any commentary or analysis outside the JSON
+
     {parser.get_format_instructions()}
 
-    Remember: Focus on SEMANTIC MEANING, not exact text matching. Different date/number formats can represent the same factual information."""
+    Remember: Focus on SEMANTIC MEANING, not exact text matching. Different date/number formats can represent the same factual information. Respond with ONLY the JSON object."""
 
 
     try:
@@ -244,7 +284,64 @@ def check_claim_with_ollama(claim, hits, model="llama3.1"):
         # Debug: print what we got from the model
         print(f"Raw model response: {cleaned_raw[:200]}{'...' if len(cleaned_raw) > 200 else ''}")
         
-        # Use PydanticOutputParser to parse the response
+        # Enhanced JSON extraction with multiple fallback strategies
+        def extract_json_from_response(text):
+            """Extract JSON from response using multiple strategies."""
+            strategies = [
+                # Strategy 1: Look for JSON wrapped in ```json``` code blocks
+                r'```json\s*(\{.*?\})\s*```',
+                # Strategy 2: Look for JSON wrapped in ``` code blocks
+                r'```\s*(\{.*?\})\s*```',
+                # Strategy 3: Look for JSON after "here is" or similar phrases
+                r'(?:here is|following|output|result).*?(\{.*?\})',
+                # Strategy 4: Look for JSON at the end of the response
+                r'(\{.*?\})\s*$',
+                # Strategy 5: Look for any JSON object in the text
+                r'(\{.*?\})',
+            ]
+            
+            for pattern in strategies:
+                matches = re.findall(pattern, text, re.DOTALL | re.IGNORECASE)
+                for match in matches:
+                    try:
+                        # Clean the match
+                        clean_match = match.strip()
+                        # Remove any trailing text after the JSON
+                        if clean_match.count('{') > clean_match.count('}'):
+                            # Find the last complete JSON object
+                            brace_count = 0
+                            end_pos = 0
+                            for i, char in enumerate(clean_match):
+                                if char == '{':
+                                    brace_count += 1
+                                elif char == '}':
+                                    brace_count -= 1
+                                    if brace_count == 0:
+                                        end_pos = i + 1
+                                        break
+                            clean_match = clean_match[:end_pos]
+                        
+                        parsed = json.loads(clean_match)
+                        if isinstance(parsed, dict) and 'verdict' in parsed:
+                            return parsed
+                    except (json.JSONDecodeError, ValueError):
+                        continue
+            
+            return None
+        
+        # Try to extract JSON using enhanced strategies
+        extracted_json = extract_json_from_response(cleaned_raw)
+        if extracted_json:
+            try:
+                return ClaimCheckResponse(
+                    verdict=extracted_json.get("verdict", "UNKNOWN"),
+                    confidence=int(extracted_json.get("confidence", 50)),
+                    explanation=extracted_json.get("explanation", "No explanation provided")
+                )
+            except (ValueError, TypeError) as e:
+                print(f"Error creating ClaimCheckResponse from extracted JSON: {e}")
+        
+        # Fallback: try PydanticOutputParser on the cleaned raw text
         try:
             parsed_response = parser.parse(cleaned_raw)
             return parsed_response
@@ -252,7 +349,7 @@ def check_claim_with_ollama(claim, hits, model="llama3.1"):
             print(f"Pydantic parsing error: {e}")
             print(f"Problematic response: {cleaned_raw[:300]}...")
             
-            # Fallback: try to extract JSON manually and create ClaimCheckResponse
+            # Final fallback: try to extract JSON manually with simple regex
             json_match = re.search(r'\{.*\}', cleaned_raw, re.DOTALL)
             if json_match:
                 json_str = json_match.group(0)
@@ -266,7 +363,7 @@ def check_claim_with_ollama(claim, hits, model="llama3.1"):
                 except (json.JSONDecodeError, ValueError) as json_error:
                     print(f"JSON fallback error: {json_error}")
             
-            # Final fallback: return error response
+            # Ultimate fallback: return error response
             return ClaimCheckResponse(
                 verdict="ERROR",
                 confidence=0,
