@@ -162,10 +162,33 @@ def check_claim_with_ollama_chain(claim, hits, model="llama3.1"):
                 try:
                     json_str = json_match.group(0)
                     parsed_json = json.loads(json_str)
+                    
+                    # Handle key variations by position (model always returns: verdict, confidence, explanation)
+                    def normalize_json_keys(data):
+                        """Normalize JSON keys based on position since model returns in order: verdict, confidence, explanation."""
+                        items = list(data.items())
+                        normalized = {}
+                        
+                        # Map by position: first = verdict, second = confidence, third = explanation
+                        if len(items) >= 1:
+                            normalized["verdict"] = items[0][1]
+                        if len(items) >= 2:
+                            normalized["confidence"] = items[1][1]
+                        if len(items) >= 3:
+                            normalized["explanation"] = items[2][1]
+                        
+                        # Keep any additional keys as-is
+                        for i in range(3, len(items)):
+                            normalized[items[i][0]] = items[i][1]
+                            
+                        return normalized
+                    
+                    normalized_json = normalize_json_keys(parsed_json)
+                    
                     return ClaimCheckResponse(
-                        verdict=parsed_json.get("verdict", "UNKNOWN"),
-                        confidence=int(parsed_json.get("confidence", 50)),
-                        explanation=parsed_json.get("explanation", "No explanation provided")
+                        verdict=normalized_json.get("verdict", "UNKNOWN"),
+                        confidence=int(normalized_json.get("confidence", 50)),
+                        explanation=normalized_json.get("explanation", "No explanation provided")
                     )
                 except (json.JSONDecodeError, ValueError):
                     pass
@@ -333,10 +356,31 @@ def check_claim_with_ollama(claim, hits, model="llama3.1"):
         extracted_json = extract_json_from_response(cleaned_raw)
         if extracted_json:
             try:
+                # Handle key variations by position (model always returns: verdict, confidence, explanation)
+                def normalize_json_keys(data):
+                    """Normalize JSON keys based on position since model returns in order: verdict, confidence, explanation."""
+                    items = list(data.items())
+                    normalized = {}
+                    
+                    # Map by position: first = verdict, second = confidence, third = explanation
+                    if len(items) >= 1:
+                        normalized["verdict"] = items[0][1]
+                    if len(items) >= 2:
+                        normalized["confidence"] = items[1][1]
+                    if len(items) >= 3:
+                        normalized["explanation"] = items[2][1]
+                    
+                    # Keep any additional keys as-is
+                    for i in range(3, len(items)):
+                        normalized[items[i][0]] = items[i][1]
+                        
+                    return normalized
+                    
+                
                 return ClaimCheckResponse(
-                    verdict=extracted_json.get("verdict", "UNKNOWN"),
-                    confidence=int(extracted_json.get("confidence", 50)),
-                    explanation=extracted_json.get("explanation", "No explanation provided")
+                    verdict=normalized_json.get("verdict", "UNKNOWN"),
+                    confidence=int(normalized_json.get("confidence", 50)),
+                    explanation=normalized_json.get("explanation", "No explanation provided")
                 )
             except (ValueError, TypeError) as e:
                 print(f"Error creating ClaimCheckResponse from extracted JSON: {e}")
@@ -355,10 +399,33 @@ def check_claim_with_ollama(claim, hits, model="llama3.1"):
                 json_str = json_match.group(0)
                 try:
                     parsed_json = json.loads(json_str)
+                    
+                    # Handle key variations by position (model always returns: verdict, confidence, explanation)
+                    def normalize_json_keys(data):
+                        """Normalize JSON keys based on position since model returns in order: verdict, confidence, explanation."""
+                        items = list(data.items())
+                        normalized = {}
+                        
+                        # Map by position: first = verdict, second = confidence, third = explanation
+                        if len(items) >= 1:
+                            normalized["verdict"] = items[0][1]
+                        if len(items) >= 2:
+                            normalized["confidence"] = items[1][1]
+                        if len(items) >= 3:
+                            normalized["explanation"] = items[2][1]
+                        
+                        # Keep any additional keys as-is
+                        for i in range(3, len(items)):
+                            normalized[items[i][0]] = items[i][1]
+                            
+                        return normalized
+                    
+                    normalized_json = normalize_json_keys(parsed_json)
+                    
                     return ClaimCheckResponse(
-                        verdict=parsed_json.get("verdict", "UNKNOWN"),
-                        confidence=int(parsed_json.get("confidence", 50)),
-                        explanation=parsed_json.get("explanation", "No explanation provided")
+                        verdict=normalized_json.get("verdict", "UNKNOWN"),
+                        confidence=int(normalized_json.get("confidence", 50)),
+                        explanation=normalized_json.get("explanation", "No explanation provided")
                     )
                 except (json.JSONDecodeError, ValueError) as json_error:
                     print(f"JSON fallback error: {json_error}")
