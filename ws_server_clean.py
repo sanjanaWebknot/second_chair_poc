@@ -350,8 +350,8 @@ async def process_pair_with_fact_check(pair: Dict[str, Any], websocket: WebSocke
         # Send result back
         if websocket.client_state.name == 'CONNECTED':
             await websocket.send_text(json.dumps(result))
-            verdict_emoji = "✅" if result.verdict == "SUPPORT" else "❌" if result.verdict == "REFUTE" else "❓"
-            print(f"{verdict_emoji} RESULT: {pair_id} -> {result.verdict} ({result.confidence}%) in {processing_time}ms")
+            verdict_emoji = "✅" if result["verdict"] == "SUPPORT" else "❌" if result["verdict"] == "REFUTE" else "❓"
+            print(f"{verdict_emoji} RESULT: {pair_id} -> {result['verdict']} ({result['confidence']}%) in {processing_time}ms")
         
     except Exception as e:
         error_result = {
