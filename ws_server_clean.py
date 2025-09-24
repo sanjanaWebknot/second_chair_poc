@@ -14,9 +14,10 @@ from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 import chromadb
 from embeddings import get_sentence_transformer  
 from chroma_utils import create_chroma_client    
-from claim_checker import check_claim_with_ollama 
+from claim_checker import check_claim_with_ollama_chain 
 from reportlab.lib.pagesizes import letter
 from reportlab.pdfgen import canvas
+from models import FactCheckResult, FactCheckError, WordAck, PairStored
 
 # Set tokenizers parallelism to avoid warning
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
@@ -321,9 +322,9 @@ async def process_pair_with_fact_check(pair: Dict[str, Any], websocket: WebSocke
         # Get similar chunks
         hits = await asyncio.to_thread(retrieve_top_k_sync, chunk["clean_text"], TOP_K)
         
-        # Fact check (no timeout - let it complete naturally)
+        # Fact check using LangChain chain pattern
         verdict = await asyncio.to_thread(
-            check_claim_with_ollama, 
+            check_claim_with_ollama_chain, 
             f"Q: {pair['question']}\nA: {pair['answer']}", 
             hits, 
             "phi3:mini"
@@ -331,37 +332,36 @@ async def process_pair_with_fact_check(pair: Dict[str, Any], websocket: WebSocke
         
         processing_time = int((time.time() - start_time) * 1000)
         
-        result = {
-            "type": "fact_check_result",
-            "pair_id": pair_id,
-            "sequence_number": pair["sequence_number"],
-            "verdict": verdict.get("verdict", "UNKNOWN"),
-            "confidence": verdict.get("confidence", 0),
-            "explanation": verdict.get("explanation", "No explanation"),
-            "question": pair["question"],
-            "answer": pair["answer"],
-            "evidence_count": len(hits),
-            "processing_time_ms": processing_time,
-            "timestamp": datetime.utcnow().isoformat()
-        }
+        # Create structured result using Pydantic model
+        result = FactCheckResult(
+            pair_id=pair_id,
+            sequence_number=pair["sequence_number"],
+            verdict=verdict.verdict,
+            confidence=verdict.confidence,
+            explanation=verdict.explanation,
+            question=pair["question"],
+            answer=pair["answer"],
+            evidence_count=len(hits),
+            processing_time_ms=processing_time,
+            timestamp=datetime.utcnow().isoformat()
+        )
         
         # Send result back
         if websocket.client_state.name == 'CONNECTED':
-            await websocket.send_text(json.dumps(result))
-            verdict_emoji = "✅" if result['verdict'] == "SUPPORT" else "❌" if result['verdict'] == "REFUTE" else "❓"
-            print(f"{verdict_emoji} RESULT: {pair_id} -> {result['verdict']} ({result['confidence']}%) in {processing_time}ms")
+            await websocket.send_text(result.json())
+            verdict_emoji = "✅" if result.verdict == "SUPPORT" else "❌" if result.verdict == "REFUTE" else "❓"
+            print(f"{verdict_emoji} RESULT: {pair_id} -> {result.verdict} ({result.confidence}%) in {processing_time}ms")
         
     except Exception as e:
-        error_result = {
-            "type": "fact_check_error",
-            "pair_id": pair_id,
-            "sequence_number": pair["sequence_number"],
-            "error": str(e),
-            "timestamp": datetime.utcnow().isoformat()
-        }
+        error_result = FactCheckError(
+            pair_id=pair_id,
+            sequence_number=pair["sequence_number"],
+            error=str(e),
+            timestamp=datetime.utcnow().isoformat()
+        )
         print(f"💥 ERROR: {pair_id} -> {e}")
         if websocket.client_state.name == 'CONNECTED':
-            await websocket.send_text(json.dumps(error_result))
+            await websocket.send_text(error_result.json())
 
 async def background_fact_checker(buffer: QAPairBuffer, websocket: WebSocket):
     """Background worker - processes ready pairs one by one."""
@@ -447,14 +447,14 @@ async def ws_check(websocket: WebSocket):
             # Send stats periodically
             if len(buffer.word_buffer) % 25 == 0:
                 stats = buffer.get_stats()
-                await websocket.send_text(json.dumps({
-                    "type": "word_ack",
-                    "words_processed": stats["total_words"],
-                    "buffer_size": stats["buffer_size"],
-                    "states": stats["states"],
-                    "current_q": stats["current_question"],
-                    "current_a": stats["current_answer"]
-                }))
+                word_ack = WordAck(
+                    words_processed=stats["total_words"],
+                    buffer_size=stats["buffer_size"],
+                    states=stats["states"],
+                    current_q=stats["current_question"],
+                    current_a=stats["current_answer"]
+                )
+                await websocket.send_text(word_ack.json())
 
     except WebSocketDisconnect:
         print("WS_CHECK_DISCONNECTED")
@@ -491,12 +491,13 @@ async def ws_append(websocket: WebSocket):
             # Send stats periodically (no fact-check results)
             if len(buffer.word_buffer) % 25 == 0:
                 stats = buffer.get_stats()
-                await websocket.send_text(json.dumps({
-                    "type": "word_ack",
-                    "words_processed": stats["total_words"],
-                    "buffer_size": stats["buffer_size"],
-                    "transcript_size": len(running_transcript)
-                }))
+                word_ack = WordAck(
+                    words_processed=stats["total_words"],
+                    buffer_size=stats["buffer_size"],
+                    states=stats["states"],
+                    transcript_size=len(running_transcript)
+                )
+                await websocket.send_text(word_ack.json())
 
     except WebSocketDisconnect:
         print("WS_APPEND_DISCONNECTED")
