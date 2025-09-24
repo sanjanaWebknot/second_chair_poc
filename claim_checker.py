@@ -85,7 +85,7 @@ def check_ollama_available(model):
     except Exception as e:
         return False, f"Error checking Ollama: {str(e)}"
 
-def check_claim_with_ollama_chain(claim, hits, model="phi3:mini"):
+def check_claim_with_ollama_chain(claim, hits, model="llama3.1"):
     """
     Run claim + evidence chunks through Ollama using LangChain chain pattern.
     Returns: ClaimCheckResponse object with validated fields.

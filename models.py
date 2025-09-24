@@ -12,8 +12,8 @@ class ClaimCheckResponse(BaseModel):
     Pydantic model for claim checking response from Ollama.
     This ensures structured, validated output for claim verification.
     """
-    verdict: Literal["SUPPORT", "REFUTE", "NOT_FOUND", "UNKNOWN"] = Field(
-        description="The verdict on the claim. Must be exactly one of: SUPPORT, REFUTE, NOT_FOUND or UNKNOWN"
+    verdict: Literal["SUPPORT", "REFUTE", "NOT_FOUND", "UNKNOWN", "ERROR"] = Field(
+        description="The verdict on the claim. Must be exactly one of: SUPPORT, REFUTE, NOT_FOUND, UNKNOWN or ERROR"
     )
     confidence: int = Field(
         ge=0, le=100,
