@@ -85,7 +85,7 @@ def check_ollama_available(model):
     except Exception as e:
         return False, f"Error checking Ollama: {str(e)}"
 
-def check_claim_with_ollama_chain(claim, hits, model="phi3:mini"):
+async def check_claim_with_ollama_chain(claim, hits, model="phi3:mini"):
     """
     Run claim + evidence chunks through Ollama using LangChain chain pattern.
     Returns: ClaimCheckResponse object with validated fields.
@@ -126,12 +126,21 @@ def check_claim_with_ollama_chain(claim, hits, model="phi3:mini"):
         # Create the chain: prompt | model | parser
         chain = prompt_template | llm | parser
         
-        # Invoke the chain
-        result = chain.invoke({
+        # Time the LLM call
+        import time
+        llm_start_time = time.time()
+        print(f"🤖 Sending prompt to {model}...")
+        
+        # Invoke the chain asynchronously
+        result = await chain.ainvoke({
             "claim": claim,
             "evidence": context_text,
             "format_instructions": parser.get_format_instructions()
         })
+        
+        llm_end_time = time.time()
+        llm_duration = llm_end_time - llm_start_time
+        print(f"⏱️ LLM response received in {llm_duration:.2f} seconds")
         
         return result
         

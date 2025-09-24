@@ -5,6 +5,7 @@ import json
 import asyncio
 import re
 import time
+import heapq
 from typing import List, Dict, Any, Optional
 from collections import deque
 from enum import Enum
@@ -28,6 +29,10 @@ EMBED_MODEL_NAME = "all-MiniLM-L6-v2"
 TOP_K = 5
 PDF_OUT = "example_testimonial_transcript.pdf"
 
+# Parallel processing constants
+MAX_CONCURRENT_TASKS = 3  # Limit concurrent LLM calls
+RESULTS_BUFFER_SIZE = 10  # Buffer size for ordered results
+
 app = FastAPI()
 
 # Initialize embedder and chroma
@@ -49,6 +54,50 @@ class PairState(Enum):
     READY_TO_PROCESS = "ready_to_process"
     PROCESSING = "processing"
     COMPLETED = "completed"
+
+class OrderedResultsBuffer:
+    """Buffer to maintain results in sequence order for parallel processing."""
+    
+    def __init__(self, max_size: int = RESULTS_BUFFER_SIZE):
+        self.max_size = max_size
+        self.results_heap = []  # Min-heap for ordered results
+        self.next_expected_seq = 1
+        self.websocket = None
+        
+    def set_websocket(self, websocket: WebSocket):
+        """Set the websocket for result delivery."""
+        self.websocket = websocket
+    
+    async def add_result(self, result: Dict[str, Any]):
+        """Add a result and deliver any consecutive results in order."""
+        seq_num = result["sequence_number"]
+        
+        # Add to heap
+        heapq.heappush(self.results_heap, (seq_num, result))
+        
+        # Deliver consecutive results in order
+        await self._deliver_consecutive_results()
+    
+    async def _deliver_consecutive_results(self):
+        """Deliver results in consecutive order starting from next_expected_seq."""
+        while self.results_heap and self.results_heap[0][0] == self.next_expected_seq:
+            seq_num, result = heapq.heappop(self.results_heap)
+            
+            if self.websocket and self.websocket.client_state.name == 'CONNECTED':
+                await self.websocket.send_text(json.dumps(result))
+                verdict_emoji = "✅" if result["verdict"] == "SUPPORT" else "❌" if result["verdict"] == "REFUTE" else "❓"
+                print(f"{verdict_emoji} DELIVERED: {result['pair_id']} -> {result['verdict']} ({result['confidence']}%) seq: {seq_num}")
+            
+            self.next_expected_seq += 1
+    
+    def get_pending_count(self) -> int:
+        """Get number of pending results."""
+        return len(self.results_heap)
+    
+    def get_next_expected_seq(self) -> int:
+        """Get the next expected sequence number."""
+        return self.next_expected_seq
+
 
 class QAPairBuffer:
     """Robust Q&A pair detection with state management for fast streams."""
@@ -307,6 +356,67 @@ def regenerate_pdf(pairs: List[Dict[str, Any]]):
     
     c.save()
 
+async def process_pair_with_semaphore(semaphore: asyncio.Semaphore, pair: Dict[str, Any], results_buffer: OrderedResultsBuffer):
+    """Process one Q&A pair with semaphore control for parallel processing."""
+    async with semaphore:  # Limit concurrent LLM calls
+        start_time = time.time()
+        pair_id = pair["id"]
+        
+        print(f"🔄 PROCESSING: {pair_id} (seq: {pair['sequence_number']})")
+        
+        try:
+            # Add to Chroma
+            chunk = make_chunk_from_pair(pair)
+            await asyncio.to_thread(add_chunk_to_chroma, chunk)
+            
+            # Get similar chunks
+            hits = await asyncio.to_thread(retrieve_top_k_sync, chunk["clean_text"], TOP_K)
+            
+            # Fact check using LangChain chain pattern
+            verdict = await check_claim_with_ollama_chain(
+                f"Q: {pair['question']}\nA: {pair['answer']}", 
+                hits, 
+                "phi3:mini"
+            )
+            
+            processing_time = int((time.time() - start_time) * 1000)
+            
+            # Create structured result as plain dictionary
+            result = {
+                "type": "fact_check_result",
+                "pair_id": pair_id,
+                "sequence_number": pair["sequence_number"],
+                "verdict": verdict.verdict,
+                "confidence": verdict.confidence,
+                "explanation": verdict.explanation,
+                "question": pair["question"],
+                "answer": pair["answer"],
+                "evidence_count": len(hits),
+                "processing_time_ms": processing_time,
+                "timestamp": datetime.utcnow().isoformat()
+            }
+            
+            # Add to ordered results buffer (will deliver in sequence order)
+            await results_buffer.add_result(result)
+            
+            print(f"✅ COMPLETED: {pair_id} -> {verdict.verdict} ({verdict.confidence}%) in {processing_time}ms")
+            
+        except Exception as e:
+            error_result = {
+                "type": "fact_check_error",
+                "pair_id": pair_id,
+                "sequence_number": pair["sequence_number"],
+                "error": str(e),
+                "timestamp": datetime.utcnow().isoformat()
+            }
+            print(f"💥 ERROR: {pair_id} -> {e}")
+            await results_buffer.add_result(error_result)
+        
+        finally:
+            # Mark pair as completed in buffer
+            buffer.mark_completed(pair_id)
+
+
 async def process_pair_with_fact_check(pair: Dict[str, Any], websocket: WebSocket):
     """Process one Q&A pair through fact-checking and send result back."""
     start_time = time.time()
@@ -365,31 +475,46 @@ async def process_pair_with_fact_check(pair: Dict[str, Any], websocket: WebSocke
         if websocket.client_state.name == 'CONNECTED':
             await websocket.send_text(json.dumps(error_result))
 
-async def background_fact_checker(buffer: QAPairBuffer, websocket: WebSocket):
-    """Background worker - processes ready pairs one by one."""
-    print("FACT_CHECK_WORKER: Started")
+async def background_fact_checker(buffer: QAPairBuffer, results_buffer: OrderedResultsBuffer):
+    """Background worker - processes ready pairs in parallel with ordered results."""
+    print("FACT_CHECK_WORKER: Started with parallel processing")
+    
+    # Semaphore to limit concurrent tasks
+    semaphore = asyncio.Semaphore(MAX_CONCURRENT_TASKS)
+    active_tasks = set()
     
     try:
         while True:
             # Get ready pairs from buffer
             ready_pairs = buffer.get_ready_pairs()
             
-            # Process each ready pair (one by one)
+            # Start processing new pairs (up to semaphore limit)
             for pair in ready_pairs:
-                buffer.mark_processing(pair["id"])
-                
+                if len(active_tasks) < MAX_CONCURRENT_TASKS:
+                    buffer.mark_processing(pair["id"])
+                    task = asyncio.create_task(
+                        process_pair_with_semaphore(semaphore, pair, results_buffer)
+                    )
+                    active_tasks.add(task)
+                    task.add_done_callback(lambda t: active_tasks.discard(t))
+            
+            # Clean up completed tasks
+            completed_tasks = [task for task in active_tasks if task.done()]
+            for task in completed_tasks:
+                active_tasks.discard(task)
                 try:
-                    await process_pair_with_fact_check(pair, websocket)
+                    await task  # Re-raise any exceptions
                 except Exception as e:
-                    print(f"TASK_ERROR: {pair['id']} -> {e}")
-                finally:
-                    buffer.mark_completed(pair["id"])
+                    print(f"TASK_ERROR: {e}")
             
             # Check buffer every 100ms
             await asyncio.sleep(0.1)
             
     except asyncio.CancelledError:
         print("FACT_CHECK_WORKER: Cancelled")
+        # Cancel all active tasks
+        for task in active_tasks:
+            task.cancel()
         raise
 
 async def background_appender(buffer: QAPairBuffer):
@@ -423,12 +548,15 @@ async def background_appender(buffer: QAPairBuffer):
 
 @app.websocket("/ws/check")
 async def ws_check(websocket: WebSocket):
-    """Check endpoint with robust fact-checking."""
+    """Check endpoint with parallel fact-checking and ordered results."""
     await websocket.accept()
-    print("WS_CHECK_CONNECTED: Fact-checking endpoint ready")
+    print("WS_CHECK_CONNECTED: Parallel fact-checking endpoint ready")
     
     buffer = QAPairBuffer(max_pairs=30)  # Larger buffer for fast streams
-    worker_task = asyncio.create_task(background_fact_checker(buffer, websocket))
+    results_buffer = OrderedResultsBuffer()
+    results_buffer.set_websocket(websocket)
+    
+    worker_task = asyncio.create_task(background_fact_checker(buffer, results_buffer))
     
     try:
         while True:
@@ -455,7 +583,9 @@ async def ws_check(websocket: WebSocket):
                     "buffer_size": stats["buffer_size"],
                     "states": stats["states"],
                     "current_q": stats["current_question"],
-                    "current_a": stats["current_answer"]
+                    "current_a": stats["current_answer"],
+                    "pending_results": results_buffer.get_pending_count(),
+                    "next_expected_seq": results_buffer.get_next_expected_seq()
                 }
                 await websocket.send_text(json.dumps(word_ack))
 
