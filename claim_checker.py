@@ -4,7 +4,7 @@ import re
 from langchain.output_parsers import PydanticOutputParser
 from langchain.prompts import PromptTemplate
 from langchain_ollama import OllamaLLM
-from models import ClaimCheckResponse, VerdictType
+from models import ClaimCheckResponse
 
 def create_claim_check_prompt():
     """Create the prompt template for claim checking."""
@@ -94,7 +94,7 @@ def check_claim_with_ollama_chain(claim, hits, model="phi3:mini"):
     available, message = check_ollama_available(model)
     if not available:
         return ClaimCheckResponse(
-            verdict=VerdictType.ERROR,
+            verdict="ERROR",
             confidence=0,
             explanation=message
         )
@@ -137,7 +137,7 @@ def check_claim_with_ollama_chain(claim, hits, model="phi3:mini"):
         
     except Exception as e:
         return ClaimCheckResponse(
-            verdict=VerdictType.ERROR,
+            verdict="ERROR",
             confidence=0,
             explanation=f"Chain processing error: {str(e)}"
         )
@@ -155,7 +155,7 @@ def check_claim_with_ollama(claim, hits, model="llama3.1"):
     available, message = check_ollama_available(model)
     if not available:
         return ClaimCheckResponse(
-            verdict=VerdictType.ERROR,
+            verdict="ERROR",
             confidence=0,
             explanation=message
         )
@@ -230,7 +230,7 @@ def check_claim_with_ollama(claim, hits, model="llama3.1"):
         
         if result.returncode != 0:
             return ClaimCheckResponse(
-                verdict=VerdictType.ERROR,
+                verdict="ERROR",
                 confidence=0,
                 explanation=f"Ollama error: {result.stderr.decode('utf-8')}"
             )
@@ -259,7 +259,7 @@ def check_claim_with_ollama(claim, hits, model="llama3.1"):
                 try:
                     parsed_json = json.loads(json_str)
                     return ClaimCheckResponse(
-                        verdict=VerdictType(parsed_json.get("verdict", "UNKNOWN")),
+                        verdict=parsed_json.get("verdict", "UNKNOWN"),
                         confidence=int(parsed_json.get("confidence", 50)),
                         explanation=parsed_json.get("explanation", "No explanation provided")
                     )
@@ -268,20 +268,20 @@ def check_claim_with_ollama(claim, hits, model="llama3.1"):
             
             # Final fallback: return error response
             return ClaimCheckResponse(
-                verdict=VerdictType.ERROR,
+                verdict="ERROR",
                 confidence=0,
                 explanation=f"Failed to parse response: {str(e)}"
             )
             
     except subprocess.TimeoutExpired:
         return ClaimCheckResponse(
-            verdict=VerdictType.ERROR,
+            verdict="ERROR",
             confidence=0,
             explanation="Ollama request timed out"
         )
     except Exception as e:
         return ClaimCheckResponse(
-            verdict=VerdictType.ERROR,
+            verdict="ERROR",
             confidence=0,
             explanation=f"Error: {str(e)}"
         )
