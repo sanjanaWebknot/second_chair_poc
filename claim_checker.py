@@ -163,27 +163,37 @@ def check_claim_with_ollama_chain(claim, hits, model="llama3.1"):
                     json_str = json_match.group(0)
                     parsed_json = json.loads(json_str)
                     
-                    # Handle key variations by position (model always returns: verdict, confidence, explanation)
-                    def normalize_json_keys(data):
-                        """Normalize JSON keys based on position since model returns in order: verdict, confidence, explanation."""
-                        items = list(data.items())
-                        normalized = {}
+                    # Handle nested JSON structures (e.g., {"victim": {"verdict": "...", "confidence": 0, "explanation": "..."}})
+                    def extract_nested_fields(data):
+                        """Extract verdict, confidence, explanation from nested JSON structures."""
+                        # If the data has the required fields at root level, use them
+                        if all(key in data for key in ["verdict", "confidence", "explanation"]):
+                            return data
                         
-                        # Map by position: first = verdict, second = confidence, third = explanation
-                        if len(items) >= 1:
-                            normalized["verdict"] = items[0][1]
-                        if len(items) >= 2:
-                            normalized["confidence"] = items[1][1]
-                        if len(items) >= 3:
-                            normalized["explanation"] = items[2][1]
+                        # If data has nested structure, look for the nested object
+                        for key, value in data.items():
+                            if isinstance(value, dict) and all(field in value for field in ["verdict", "confidence", "explanation"]):
+                                return value
                         
-                        # Keep any additional keys as-is
-                        for i in range(3, len(items)):
-                            normalized[items[i][0]] = items[i][1]
-                            
-                        return normalized
+                        # Fallback: try to extract from any nested dict that has the required fields
+                        def find_nested_fields(obj, path=""):
+                            if isinstance(obj, dict):
+                                if all(field in obj for field in ["verdict", "confidence", "explanation"]):
+                                    return obj
+                                for k, v in obj.items():
+                                    result = find_nested_fields(v, f"{path}.{k}" if path else k)
+                                    if result:
+                                        return result
+                            return None
+                        
+                        nested_result = find_nested_fields(data)
+                        if nested_result:
+                            return nested_result
+                        
+                        # If no nested structure found, return original data
+                        return data
                     
-                    normalized_json = normalize_json_keys(parsed_json)
+                    normalized_json = extract_nested_fields(parsed_json)
                     
                     return ClaimCheckResponse(
                         verdict=normalized_json.get("verdict", "UNKNOWN"),
@@ -356,28 +366,38 @@ def check_claim_with_ollama(claim, hits, model="llama3.1"):
         extracted_json = extract_json_from_response(cleaned_raw)
         if extracted_json:
             try:
-                # Handle key variations by position (model always returns: verdict, confidence, explanation)
-                def normalize_json_keys(data):
-                    """Normalize JSON keys based on position since model returns in order: verdict, confidence, explanation."""
-                    items = list(data.items())
-                    normalized = {}
+                # Handle nested JSON structures (e.g., {"victim": {"verdict": "...", "confidence": 0, "explanation": "..."}})
+                def extract_nested_fields(data):
+                    """Extract verdict, confidence, explanation from nested JSON structures."""
+                    # If the data has the required fields at root level, use them
+                    if all(key in data for key in ["verdict", "confidence", "explanation"]):
+                        return data
                     
-                    # Map by position: first = verdict, second = confidence, third = explanation
-                    if len(items) >= 1:
-                        normalized["verdict"] = items[0][1]
-                    if len(items) >= 2:
-                        normalized["confidence"] = items[1][1]
-                    if len(items) >= 3:
-                        normalized["explanation"] = items[2][1]
+                    # If data has nested structure, look for the nested object
+                    for key, value in data.items():
+                        if isinstance(value, dict) and all(field in value for field in ["verdict", "confidence", "explanation"]):
+                            return value
                     
-                    # Keep any additional keys as-is
-                    for i in range(3, len(items)):
-                        normalized[items[i][0]] = items[i][1]
-                        
-                    return normalized
+                    # Fallback: try to extract from any nested dict that has the required fields
+                    def find_nested_fields(obj, path=""):
+                        if isinstance(obj, dict):
+                            if all(field in obj for field in ["verdict", "confidence", "explanation"]):
+                                return obj
+                            for k, v in obj.items():
+                                result = find_nested_fields(v, f"{path}.{k}" if path else k)
+                                if result:
+                                    return result
+                        return None
+                    
+                    nested_result = find_nested_fields(data)
+                    if nested_result:
+                        return nested_result
+                    
+                    # If no nested structure found, return original data
+                    return data
                 
-                # Apply the normalization function to the extracted JSON
-                normalized_json = normalize_json_keys(extracted_json)
+                # Extract fields from nested structure
+                normalized_json = extract_nested_fields(extracted_json)
                 
                 return ClaimCheckResponse(
                     verdict=normalized_json.get("verdict", "UNKNOWN"),
@@ -402,27 +422,37 @@ def check_claim_with_ollama(claim, hits, model="llama3.1"):
                 try:
                     parsed_json = json.loads(json_str)
                     
-                    # Handle key variations by position (model always returns: verdict, confidence, explanation)
-                    def normalize_json_keys(data):
-                        """Normalize JSON keys based on position since model returns in order: verdict, confidence, explanation."""
-                        items = list(data.items())
-                        normalized = {}
+                    # Handle nested JSON structures (e.g., {"victim": {"verdict": "...", "confidence": 0, "explanation": "..."}})
+                    def extract_nested_fields(data):
+                        """Extract verdict, confidence, explanation from nested JSON structures."""
+                        # If the data has the required fields at root level, use them
+                        if all(key in data for key in ["verdict", "confidence", "explanation"]):
+                            return data
                         
-                        # Map by position: first = verdict, second = confidence, third = explanation
-                        if len(items) >= 1:
-                            normalized["verdict"] = items[0][1]
-                        if len(items) >= 2:
-                            normalized["confidence"] = items[1][1]
-                        if len(items) >= 3:
-                            normalized["explanation"] = items[2][1]
+                        # If data has nested structure, look for the nested object
+                        for key, value in data.items():
+                            if isinstance(value, dict) and all(field in value for field in ["verdict", "confidence", "explanation"]):
+                                return value
                         
-                        # Keep any additional keys as-is
-                        for i in range(3, len(items)):
-                            normalized[items[i][0]] = items[i][1]
-                            
-                        return normalized
+                        # Fallback: try to extract from any nested dict that has the required fields
+                        def find_nested_fields(obj, path=""):
+                            if isinstance(obj, dict):
+                                if all(field in obj for field in ["verdict", "confidence", "explanation"]):
+                                    return obj
+                                for k, v in obj.items():
+                                    result = find_nested_fields(v, f"{path}.{k}" if path else k)
+                                    if result:
+                                        return result
+                            return None
+                        
+                        nested_result = find_nested_fields(data)
+                        if nested_result:
+                            return nested_result
+                        
+                        # If no nested structure found, return original data
+                        return data
                     
-                    normalized_json = normalize_json_keys(parsed_json)
+                    normalized_json = extract_nested_fields(parsed_json)
                     
                     return ClaimCheckResponse(
                         verdict=normalized_json.get("verdict", "UNKNOWN"),

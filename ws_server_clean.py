@@ -526,50 +526,20 @@ async def ws_check(websocket: WebSocket):
                 continue
 
             # Handle transcript events
-            if payload.get("type") == "transcript.start":
+            if payload.get("type") == "start_transcript":
                 result = await start_transcript_session()
                 await websocket.send_text(json.dumps({
                     "type": "transcript_event",
-                    "event": "transcript.start",
-                    "sessionId": payload.get("sessionId"),
-                    "timestamp": payload.get("timestamp"),
-                    "lineNumber": payload.get("lineNumber"),
-                    "timestampMs": payload.get("timestampMs"),
+                    "event": "start_transcript",
                     **result
                 }))
                 continue
                 
-            elif payload.get("type") == "transcript.pause":
-                await websocket.send_text(json.dumps({
-                    "type": "transcript_event",
-                    "event": "transcript.pause",
-                    "sessionId": payload.get("sessionId"),
-                    "totalLines": payload.get("totalLines"),
-                    "timestampMs": payload.get("timestampMs"),
-                    "status": "paused",
-                    "message": "Transcript session paused"
-                }))
-                continue
-                
-            elif payload.get("type") == "transcript.resume":
-                await websocket.send_text(json.dumps({
-                    "type": "transcript_event",
-                    "event": "transcript.resume",
-                    "sessionId": payload.get("sessionId"),
-                    "timestampMs": payload.get("timestampMs"),
-                    "status": "resumed",
-                    "message": "Transcript session resumed"
-                }))
-                continue
-                
-            elif payload.get("type") == "transcript.end":
+            elif payload.get("type") == "end_transcript":
                 result = await end_transcript_session()
                 await websocket.send_text(json.dumps({
                     "type": "transcript_event",
-                    "event": "transcript.end",
-                    "sessionId": payload.get("sessionId"),
-                    "totalLines": payload.get("totalLines"),
-                    "timestampMs": payload.get("timestampMs"),
+                    "event": "end_transcript",
                     **result
                 }))
                 continue
@@ -629,50 +599,20 @@ async def ws_append(websocket: WebSocket):
                 continue
 
             # Handle transcript events
-            if payload.get("type") == "transcript.start":
+            if payload.get("type") == "start_transcript":
                 result = await start_transcript_session()
                 await websocket.send_text(json.dumps({
                     "type": "transcript_event",
-                    "event": "transcript.start",
-                    "sessionId": payload.get("sessionId"),
-                    "timestamp": payload.get("timestamp"),
-                    "lineNumber": payload.get("lineNumber"),
-                    "timestampMs": payload.get("timestampMs"),
+                    "event": "start_transcript",
                     **result
                 }))
                 continue
                 
-            elif payload.get("type") == "transcript.pause":
-                await websocket.send_text(json.dumps({
-                    "type": "transcript_event",
-                    "event": "transcript.pause",
-                    "sessionId": payload.get("sessionId"),
-                    "totalLines": payload.get("totalLines"),
-                    "timestampMs": payload.get("timestampMs"),
-                    "status": "paused",
-                    "message": "Transcript session paused"
-                }))
-                continue
-                
-            elif payload.get("type") == "transcript.resume":
-                await websocket.send_text(json.dumps({
-                    "type": "transcript_event",
-                    "event": "transcript.resume",
-                    "sessionId": payload.get("sessionId"),
-                    "timestampMs": payload.get("timestampMs"),
-                    "status": "resumed",
-                    "message": "Transcript session resumed"
-                }))
-                continue
-                
-            elif payload.get("type") == "transcript.end":
+            elif payload.get("type") == "end_transcript":
                 result = await end_transcript_session()
                 await websocket.send_text(json.dumps({
                     "type": "transcript_event",
-                    "event": "transcript.end",
-                    "sessionId": payload.get("sessionId"),
-                    "totalLines": payload.get("totalLines"),
-                    "timestampMs": payload.get("timestampMs"),
+                    "event": "end_transcript",
                     **result
                 }))
                 continue
