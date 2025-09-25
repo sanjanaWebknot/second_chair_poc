@@ -50,6 +50,7 @@ connection_lock = asyncio.Lock()
 
 # Transcript session state
 transcript_session_active = False
+transcript_session_paused = False
 transcript_session_id: Optional[str] = None
 transcript_start_time: Optional[datetime] = None
 session_lock = asyncio.Lock()
@@ -326,7 +327,7 @@ def regenerate_pdf(pairs: List[Dict[str, Any]], session_id: Optional[str] = None
     print(f"📄 PDF_SAVED: {pdf_filename} with {len(pairs)} pairs")
 
 # Session management functions
-async def start_transcript_session():
+async def start_transcript_session(session_id=None, timestamp=None):
     """Start a new transcript session."""
     global transcript_session_active, transcript_session_id, transcript_start_time
     
@@ -335,7 +336,7 @@ async def start_transcript_session():
             return {"status": "error", "message": "Transcript session already active"}
         
         transcript_session_active = True
-        transcript_session_id = f"session_{uuid.uuid4().hex[:8]}"
+        transcript_session_id = session_id or f"session_{uuid.uuid4().hex[:8]}"
         transcript_start_time = datetime.utcnow()
         
         print(f"🟢 TRANSCRIPT_START: {transcript_session_id}")
@@ -343,12 +344,47 @@ async def start_transcript_session():
             "status": "success", 
             "message": "Transcript session started",
             "session_id": transcript_session_id,
-            "start_time": transcript_start_time.isoformat()
+            "start_time": transcript_start_time.isoformat(),
+            "timestamp": timestamp
         }
 
-async def end_transcript_session():
+async def pause_transcript_session():
+    """Pause the current transcript session."""
+    global transcript_session_paused
+    
+    async with session_lock:
+        if not transcript_session_active:
+            return {"status": "error", "message": "No active transcript session"}
+        
+        transcript_session_paused = True
+        print(f"⏸️ TRANSCRIPT_PAUSE: {transcript_session_id}")
+        return {
+            "status": "success",
+            "message": "Transcript session paused",
+            "session_id": transcript_session_id,
+            "timestamp": datetime.utcnow().isoformat()
+        }
+
+async def resume_transcript_session():
+    """Resume the current transcript session."""
+    global transcript_session_paused
+    
+    async with session_lock:
+        if not transcript_session_active:
+            return {"status": "error", "message": "No active transcript session"}
+        
+        transcript_session_paused = False
+        print(f"▶️ TRANSCRIPT_RESUME: {transcript_session_id}")
+        return {
+            "status": "success",
+            "message": "Transcript session resumed",
+            "session_id": transcript_session_id,
+            "timestamp": datetime.utcnow().isoformat()
+        }
+
+async def end_transcript_session(total_lines=None):
     """End the current transcript session and save PDF."""
-    global transcript_session_active, transcript_session_id, transcript_start_time
+    global transcript_session_active, transcript_session_paused, transcript_session_id, transcript_start_time
     
     async with session_lock:
         if not transcript_session_active:
@@ -363,6 +399,7 @@ async def end_transcript_session():
         
         # Reset session state
         transcript_session_active = False
+        transcript_session_paused = False
         transcript_session_id = None
         transcript_start_time = None
         
@@ -373,7 +410,8 @@ async def end_transcript_session():
             "session_id": session_id,
             "start_time": start_time.isoformat() if start_time else None,
             "end_time": datetime.utcnow().isoformat(),
-            "pairs_saved": len(running_transcript)
+            "pairs_saved": len(running_transcript),
+            "total_lines": total_lines
         }
 
 async def get_transcript_session_status():
@@ -381,6 +419,7 @@ async def get_transcript_session_status():
     async with session_lock:
         return {
             "active": transcript_session_active,
+            "paused": transcript_session_paused,
             "session_id": transcript_session_id,
             "start_time": transcript_start_time.isoformat() if transcript_start_time else None,
             "transcript_size": len(running_transcript)
@@ -454,8 +493,8 @@ async def background_fact_checker(buffer: QAPairBuffer, websocket: WebSocket):
     
     try:
         while True:
-            # Only process if transcript session is active
-            if transcript_session_active:
+            # Only process if transcript session is active and not paused
+            if transcript_session_active and not transcript_session_paused:
                 # Get ready pairs from buffer
                 ready_pairs = buffer.get_ready_pairs()
                 
@@ -483,8 +522,8 @@ async def background_appender(buffer: QAPairBuffer):
     
     try:
         while True:
-            # Only process if transcript session is active
-            if transcript_session_active:
+            # Only process if transcript session is active and not paused
+            if transcript_session_active and not transcript_session_paused:
                 # Get ready pairs from buffer
                 ready_pairs = buffer.get_ready_pairs()
                 
@@ -526,20 +565,41 @@ async def ws_check(websocket: WebSocket):
                 continue
 
             # Handle transcript events
-            if payload.get("type") == "start_transcript":
-                result = await start_transcript_session()
+            if payload.get("type") == "transcript.start":
+                session_id = payload.get("sessionId")
+                timestamp = payload.get("timestamp")
+                result = await start_transcript_session(session_id=session_id, timestamp=timestamp)
                 await websocket.send_text(json.dumps({
                     "type": "transcript_event",
-                    "event": "start_transcript",
+                    "event": "transcript.start",
                     **result
                 }))
                 continue
                 
-            elif payload.get("type") == "end_transcript":
-                result = await end_transcript_session()
+            elif payload.get("type") == "transcript.pause":
+                result = await pause_transcript_session()
                 await websocket.send_text(json.dumps({
                     "type": "transcript_event",
-                    "event": "end_transcript",
+                    "event": "transcript.pause",
+                    **result
+                }))
+                continue
+                
+            elif payload.get("type") == "transcript.resume":
+                result = await resume_transcript_session()
+                await websocket.send_text(json.dumps({
+                    "type": "transcript_event",
+                    "event": "transcript.resume",
+                    **result
+                }))
+                continue
+                
+            elif payload.get("type") == "transcript.end":
+                total_lines = payload.get("totalLines")
+                result = await end_transcript_session(total_lines=total_lines)
+                await websocket.send_text(json.dumps({
+                    "type": "transcript_event",
+                    "event": "transcript.end",
                     **result
                 }))
                 continue
@@ -549,8 +609,8 @@ async def ws_check(websocket: WebSocket):
             if not word:
                 continue
             
-            # Only process words during active transcript sessions
-            if transcript_session_active:
+            # Only process words during active transcript sessions (not paused)
+            if transcript_session_active and not transcript_session_paused:
                 # Add word to buffer
                 ready_pairs = buffer.add_word(word)
                 
@@ -564,8 +624,15 @@ async def ws_check(websocket: WebSocket):
                         "states": stats["states"],
                         "current_q": stats["current_question"],
                         "current_a": stats["current_answer"],
-                        "session_active": transcript_session_active
+                        "session_active": transcript_session_active,
+                        "session_paused": transcript_session_paused
                     }))
+            elif transcript_session_active and transcript_session_paused:
+                # Send warning if trying to process words during paused session
+                await websocket.send_text(json.dumps({
+                    "type": "warning",
+                    "message": "Transcript session is paused - resume session to process words"
+                }))
             else:
                 # Send warning if trying to process words outside session
                 await websocket.send_text(json.dumps({
@@ -599,20 +666,41 @@ async def ws_append(websocket: WebSocket):
                 continue
 
             # Handle transcript events
-            if payload.get("type") == "start_transcript":
-                result = await start_transcript_session()
+            if payload.get("type") == "transcript.start":
+                session_id = payload.get("sessionId")
+                timestamp = payload.get("timestamp")
+                result = await start_transcript_session(session_id=session_id, timestamp=timestamp)
                 await websocket.send_text(json.dumps({
                     "type": "transcript_event",
-                    "event": "start_transcript",
+                    "event": "transcript.start",
                     **result
                 }))
                 continue
                 
-            elif payload.get("type") == "end_transcript":
-                result = await end_transcript_session()
+            elif payload.get("type") == "transcript.pause":
+                result = await pause_transcript_session()
                 await websocket.send_text(json.dumps({
                     "type": "transcript_event",
-                    "event": "end_transcript",
+                    "event": "transcript.pause",
+                    **result
+                }))
+                continue
+                
+            elif payload.get("type") == "transcript.resume":
+                result = await resume_transcript_session()
+                await websocket.send_text(json.dumps({
+                    "type": "transcript_event",
+                    "event": "transcript.resume",
+                    **result
+                }))
+                continue
+                
+            elif payload.get("type") == "transcript.end":
+                total_lines = payload.get("totalLines")
+                result = await end_transcript_session(total_lines=total_lines)
+                await websocket.send_text(json.dumps({
+                    "type": "transcript_event",
+                    "event": "transcript.end",
                     **result
                 }))
                 continue
@@ -622,8 +710,8 @@ async def ws_append(websocket: WebSocket):
             if not word:
                 continue
             
-            # Only process words during active transcript sessions
-            if transcript_session_active:
+            # Only process words during active transcript sessions (not paused)
+            if transcript_session_active and not transcript_session_paused:
                 # Add word to buffer
                 ready_pairs = buffer.add_word(word)
                 
@@ -635,8 +723,15 @@ async def ws_append(websocket: WebSocket):
                         "words_processed": stats["total_words"],
                         "buffer_size": stats["buffer_size"],
                         "transcript_size": len(running_transcript),
-                        "session_active": transcript_session_active
+                        "session_active": transcript_session_active,
+                        "session_paused": transcript_session_paused
                     }))
+            elif transcript_session_active and transcript_session_paused:
+                # Send warning if trying to process words during paused session
+                await websocket.send_text(json.dumps({
+                    "type": "warning",
+                    "message": "Transcript session is paused - resume session to process words"
+                }))
             else:
                 # Send warning if trying to process words outside session
                 await websocket.send_text(json.dumps({
@@ -665,6 +760,16 @@ async def get_status():
 async def start_transcript():
     """Start a new transcript session via REST API."""
     return await start_transcript_session()
+
+@app.post("/pause_transcript")
+async def pause_transcript():
+    """Pause the current transcript session via REST API."""
+    return await pause_transcript_session()
+
+@app.post("/resume_transcript")
+async def resume_transcript():
+    """Resume the current transcript session via REST API."""
+    return await resume_transcript_session()
 
 @app.post("/end_transcript")
 async def end_transcript():
