@@ -20,10 +20,6 @@ class ClaimCheckResponse(BaseModel):
         description="Confidence score from 0-100"
     )
     explanation: Optional[str] = Field(
-        default=None,
+        default="No explanation available",
         description="Detailed explanation of the verdict and reasoning"
     )
-    
-    def get_explanation(self) -> str:
-        """Get explanation with fallback to default message."""
-        return self.explanation or "No explanation available"

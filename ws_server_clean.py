@@ -402,7 +402,7 @@ async def process_pair_with_fact_check(pair: Dict[str, Any], websocket: WebSocke
         hits = await asyncio.to_thread(retrieve_top_k_sync, chunk["clean_text"], TOP_K)
         
         # Fact check (no timeout - let it complete naturally)
-        verdict = await asyncio.to_thread(
+        verdict_response = await asyncio.to_thread(
             check_claim_with_ollama, 
             f"Q: {pair['question']}\nA: {pair['answer']}", 
             hits, 
@@ -411,13 +411,18 @@ async def process_pair_with_fact_check(pair: Dict[str, Any], websocket: WebSocke
         
         processing_time = int((time.time() - start_time) * 1000)
         
+        # Handle Pydantic object properly
+        verdict = verdict_response.verdict if hasattr(verdict_response, 'verdict') else "UNKNOWN"
+        confidence = verdict_response.confidence if hasattr(verdict_response, 'confidence') else 0
+        explanation = verdict_response.explanation if hasattr(verdict_response, 'explanation') else "No explanation available"
+        
         result = {
             "type": "fact_check_result",
             "pair_id": pair_id,
             "sequence_number": pair["sequence_number"],
-            "verdict": verdict.verdict,
-            "confidence": verdict.confidence,
-            "explanation": verdict.get_explanation(),
+            "verdict": verdict,
+            "confidence": confidence,
+            "explanation": explanation,
             "question": pair["question"],
             "answer": pair["answer"],
             "evidence_count": len(hits),
@@ -428,8 +433,8 @@ async def process_pair_with_fact_check(pair: Dict[str, Any], websocket: WebSocke
         # Send result back
         if websocket.client_state.name == 'CONNECTED':
             await websocket.send_text(json.dumps(result))
-            verdict_emoji = "✅" if verdict.verdict == "SUPPORT" else "❌" if verdict.verdict == "REFUTE" else "❓"
-            print(f"{verdict_emoji} RESULT: {pair_id} -> {verdict.verdict} ({verdict.confidence}%) in {processing_time}ms")
+            verdict_emoji = "✅" if verdict == "SUPPORT" else "❌" if verdict == "REFUTE" else "❓"
+            print(f"{verdict_emoji} RESULT: {pair_id} -> {verdict} ({confidence}%) in {processing_time}ms")
         
     except Exception as e:
         error_result = {

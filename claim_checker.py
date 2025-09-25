@@ -188,7 +188,7 @@ def check_claim_with_ollama_chain(claim, hits, model="llama3.1"):
                     return ClaimCheckResponse(
                         verdict=normalized_json.get("verdict", "UNKNOWN"),
                         confidence=int(normalized_json.get("confidence", 50)),
-                        explanation=normalized_json.get("explanation") or "No explanation available"
+                        explanation=normalized_json.get("explanation", "No explanation available")
                     )
                 except (json.JSONDecodeError, ValueError):
                     pass
@@ -375,12 +375,14 @@ def check_claim_with_ollama(claim, hits, model="llama3.1"):
                         normalized[items[i][0]] = items[i][1]
                         
                     return normalized
-                    
+                
+                # Apply the normalization function to the extracted JSON
+                normalized_json = normalize_json_keys(extracted_json)
                 
                 return ClaimCheckResponse(
                     verdict=normalized_json.get("verdict", "UNKNOWN"),
                     confidence=int(normalized_json.get("confidence", 50)),
-                    explanation=normalized_json.get("explanation") or "No explanation available"
+                    explanation=normalized_json.get("explanation", "No explanation available")
                 )
             except (ValueError, TypeError) as e:
                 print(f"Error creating ClaimCheckResponse from extracted JSON: {e}")
@@ -425,7 +427,7 @@ def check_claim_with_ollama(claim, hits, model="llama3.1"):
                     return ClaimCheckResponse(
                         verdict=normalized_json.get("verdict", "UNKNOWN"),
                         confidence=int(normalized_json.get("confidence", 50)),
-                        explanation=normalized_json.get("explanation") or "No explanation available"
+                        explanation=normalized_json.get("explanation", "No explanation available")
                     )
                 except (json.JSONDecodeError, ValueError) as json_error:
                     print(f"JSON fallback error: {json_error}")
