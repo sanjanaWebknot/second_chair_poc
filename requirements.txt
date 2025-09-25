@@ -4,6 +4,8 @@ pytesseract
 Pillow 
 
 langchain 
+pydantic
+langchain-ollama
 
 sentence-transformers 
 chromadb 

@@ -17,7 +17,7 @@ from chroma_utils import (
     upsert_chunks_to_chroma,
     query_negative_statement,
 )
-from claim_checker import check_claim_with_ollama
+from claim_checker import check_claim_with_ollama_chain
 
 # Configuration
 PDF_FILE = "Deposition_Joseph_Nadeau.pdf"
@@ -123,9 +123,9 @@ def check_claim(chroma_client, embedder, statement, top_k=5, model="phi3:mini"):
         context = hit['metadata'].get('context', 'unknown')
         print(f"    {i+1}. Page {page}, Lines {lines} ({qna_count} Q&A pairs, context: {context}, relevance: {relevance:.3f})")
     
-    # Send to Ollama
-    print(f"\nAnalyzing with Ollama ({model})...")
-    verdict = check_claim_with_ollama(statement, hits, model=model)
+    # Send to Ollama using LangChain chain
+    print(f"\nAnalyzing with Ollama ({model}) using LangChain chain...")
+    verdict = check_claim_with_ollama_chain(statement, hits, model=model)
     
     # Display results
     print(f"\n{'='*60}")
@@ -138,11 +138,11 @@ def check_claim(chroma_client, embedder, statement, top_k=5, model="phi3:mini"):
         "NOT_FOUND": "[NOT_FOUND]",
         "ERROR": "[ERROR]",
         "UNKNOWN": "[UNKNOWN]"
-    }.get(verdict['verdict'], "[UNKNOWN]")
+    }.get(verdict.verdict, "[UNKNOWN]")
     
     print(f"Verdict: {verdict_symbol}")
-    print(f"Confidence: {verdict['confidence']}%")
-    print(f"Explanation: {verdict['explanation']}")
+    print(f"Confidence: {verdict.confidence}%")
+    print(f"Explanation: {verdict.explanation}")
     print(f"{'='*60}")
     
     return verdict
