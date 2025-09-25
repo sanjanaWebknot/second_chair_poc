@@ -14,10 +14,10 @@ from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 import chromadb
 from embeddings import get_sentence_transformer  
 from chroma_utils import create_chroma_client    
-from claim_checker import check_claim_with_ollama_chain 
+from claim_checker import check_claim_with_ollama 
+from models import ClaimCheckResponse
 from reportlab.lib.pagesizes import letter
 from reportlab.pdfgen import canvas
-from models import ClaimCheckResponse
 
 # Set tokenizers parallelism to avoid warning
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
@@ -43,6 +43,16 @@ else:
 running_transcript: List[Dict[str, Any]] = []
 transcript_lock = asyncio.Lock()
 global_sequence_counter = 0
+
+# Connection tracking
+active_connections: Dict[str, Dict] = {}
+connection_lock = asyncio.Lock()
+
+# Transcript session state
+transcript_session_active = False
+transcript_session_id: Optional[str] = None
+transcript_start_time: Optional[datetime] = None
+session_lock = asyncio.Lock()
 
 class PairState(Enum):
     FORMING = "forming"
@@ -274,9 +284,14 @@ def make_chunk_from_pair(pair: Dict[str, Any]) -> Dict[str, Any]:
         "timestamp": pair["timestamp"]
     }
 
-def regenerate_pdf(pairs: List[Dict[str, Any]]):
+def regenerate_pdf(pairs: List[Dict[str, Any]], session_id: Optional[str] = None):
     """Generate PDF from Q&A pairs."""
-    c = canvas.Canvas(PDF_OUT, pagesize=letter)
+    if session_id:
+        pdf_filename = f"transcript_session_{session_id}.pdf"
+    else:
+        pdf_filename = PDF_OUT
+        
+    c = canvas.Canvas(pdf_filename, pagesize=letter)
     width, height = letter
     margin = 40
     y = height - margin
@@ -284,6 +299,8 @@ def regenerate_pdf(pairs: List[Dict[str, Any]]):
     c.setFont("Times-Roman", 11)
     
     header = f"Testimonial Transcript — {datetime.utcnow().isoformat()}Z"
+    if session_id:
+        header += f" (Session: {session_id})"
     c.drawString(margin, y, header)
     y -= 2 * line_height
 
@@ -306,6 +323,68 @@ def regenerate_pdf(pairs: List[Dict[str, Any]]):
         y -= line_height * 2
     
     c.save()
+    print(f"📄 PDF_SAVED: {pdf_filename} with {len(pairs)} pairs")
+
+# Session management functions
+async def start_transcript_session():
+    """Start a new transcript session."""
+    global transcript_session_active, transcript_session_id, transcript_start_time
+    
+    async with session_lock:
+        if transcript_session_active:
+            return {"status": "error", "message": "Transcript session already active"}
+        
+        transcript_session_active = True
+        transcript_session_id = f"session_{uuid.uuid4().hex[:8]}"
+        transcript_start_time = datetime.utcnow()
+        
+        print(f"🟢 TRANSCRIPT_START: {transcript_session_id}")
+        return {
+            "status": "success", 
+            "message": "Transcript session started",
+            "session_id": transcript_session_id,
+            "start_time": transcript_start_time.isoformat()
+        }
+
+async def end_transcript_session():
+    """End the current transcript session and save PDF."""
+    global transcript_session_active, transcript_session_id, transcript_start_time
+    
+    async with session_lock:
+        if not transcript_session_active:
+            return {"status": "error", "message": "No active transcript session"}
+        
+        session_id = transcript_session_id
+        start_time = transcript_start_time
+        
+        # Save current transcript to PDF
+        async with transcript_lock:
+            await asyncio.to_thread(regenerate_pdf, running_transcript, session_id)
+        
+        # Reset session state
+        transcript_session_active = False
+        transcript_session_id = None
+        transcript_start_time = None
+        
+        print(f"🛑 TRANSCRIPT_END: {session_id} - PDF saved")
+        return {
+            "status": "success",
+            "message": "Transcript session ended and PDF saved",
+            "session_id": session_id,
+            "start_time": start_time.isoformat() if start_time else None,
+            "end_time": datetime.utcnow().isoformat(),
+            "pairs_saved": len(running_transcript)
+        }
+
+async def get_transcript_session_status():
+    """Get current transcript session status."""
+    async with session_lock:
+        return {
+            "active": transcript_session_active,
+            "session_id": transcript_session_id,
+            "start_time": transcript_start_time.isoformat() if transcript_start_time else None,
+            "transcript_size": len(running_transcript)
+        }
 
 async def process_pair_with_fact_check(pair: Dict[str, Any], websocket: WebSocket):
     """Process one Q&A pair through fact-checking and send result back."""
@@ -322,9 +401,9 @@ async def process_pair_with_fact_check(pair: Dict[str, Any], websocket: WebSocke
         # Get similar chunks
         hits = await asyncio.to_thread(retrieve_top_k_sync, chunk["clean_text"], TOP_K)
         
-        # Fact check using LangChain chain pattern
-        verdict = await asyncio.to_thread(
-            check_claim_with_ollama_chain, 
+        # Fact check (no timeout - let it complete naturally)
+        verdict_response = await asyncio.to_thread(
+            check_claim_with_ollama, 
             f"Q: {pair['question']}\nA: {pair['answer']}", 
             hits, 
             "phi3:mini"
@@ -332,14 +411,18 @@ async def process_pair_with_fact_check(pair: Dict[str, Any], websocket: WebSocke
         
         processing_time = int((time.time() - start_time) * 1000)
         
-        # Create structured result as plain dictionary
+        # Handle Pydantic object properly
+        verdict = verdict_response.verdict if hasattr(verdict_response, 'verdict') else "UNKNOWN"
+        confidence = verdict_response.confidence if hasattr(verdict_response, 'confidence') else 0
+        explanation = verdict_response.explanation if hasattr(verdict_response, 'explanation') else "No explanation available"
+        
         result = {
             "type": "fact_check_result",
             "pair_id": pair_id,
             "sequence_number": pair["sequence_number"],
-            "verdict": verdict.verdict,
-            "confidence": verdict.confidence,
-            "explanation": verdict.explanation,
+            "verdict": verdict,
+            "confidence": confidence,
+            "explanation": explanation,
             "question": pair["question"],
             "answer": pair["answer"],
             "evidence_count": len(hits),
@@ -350,8 +433,8 @@ async def process_pair_with_fact_check(pair: Dict[str, Any], websocket: WebSocke
         # Send result back
         if websocket.client_state.name == 'CONNECTED':
             await websocket.send_text(json.dumps(result))
-            verdict_emoji = "✅" if result["verdict"] == "SUPPORT" else "❌" if result["verdict"] == "REFUTE" else "❓"
-            print(f"{verdict_emoji} RESULT: {pair_id} -> {result['verdict']} ({result['confidence']}%) in {processing_time}ms")
+            verdict_emoji = "✅" if verdict == "SUPPORT" else "❌" if verdict == "REFUTE" else "❓"
+            print(f"{verdict_emoji} RESULT: {pair_id} -> {verdict} ({confidence}%) in {processing_time}ms")
         
     except Exception as e:
         error_result = {
@@ -366,24 +449,26 @@ async def process_pair_with_fact_check(pair: Dict[str, Any], websocket: WebSocke
             await websocket.send_text(json.dumps(error_result))
 
 async def background_fact_checker(buffer: QAPairBuffer, websocket: WebSocket):
-    """Background worker - processes ready pairs one by one."""
+    """Background worker - processes ready pairs one by one during active sessions."""
     print("FACT_CHECK_WORKER: Started")
     
     try:
         while True:
-            # Get ready pairs from buffer
-            ready_pairs = buffer.get_ready_pairs()
-            
-            # Process each ready pair (one by one)
-            for pair in ready_pairs:
-                buffer.mark_processing(pair["id"])
+            # Only process if transcript session is active
+            if transcript_session_active:
+                # Get ready pairs from buffer
+                ready_pairs = buffer.get_ready_pairs()
                 
-                try:
-                    await process_pair_with_fact_check(pair, websocket)
-                except Exception as e:
-                    print(f"TASK_ERROR: {pair['id']} -> {e}")
-                finally:
-                    buffer.mark_completed(pair["id"])
+                # Process each ready pair (one by one)
+                for pair in ready_pairs:
+                    buffer.mark_processing(pair["id"])
+                    
+                    try:
+                        await process_pair_with_fact_check(pair, websocket)
+                    except Exception as e:
+                        print(f"TASK_ERROR: {pair['id']} -> {e}")
+                    finally:
+                        buffer.mark_completed(pair["id"])
             
             # Check buffer every 100ms
             await asyncio.sleep(0.1)
@@ -393,26 +478,27 @@ async def background_fact_checker(buffer: QAPairBuffer, websocket: WebSocket):
         raise
 
 async def background_appender(buffer: QAPairBuffer):
-    """Background worker for appending to transcript."""
+    """Background worker for appending to transcript during active sessions."""
     print("APPEND_WORKER: Started")
     
     try:
         while True:
-            # Get ready pairs from buffer
-            ready_pairs = buffer.get_ready_pairs()
-            
-            for pair in ready_pairs:
-                buffer.mark_processing(pair["id"])
+            # Only process if transcript session is active
+            if transcript_session_active:
+                # Get ready pairs from buffer
+                ready_pairs = buffer.get_ready_pairs()
                 
-                try:
-                    async with transcript_lock:
-                        running_transcript.append(pair)
-                        print(f"APPENDED: {pair['id']} (seq: {pair['sequence_number']}) -> size: {len(running_transcript)}")
-                        await asyncio.to_thread(regenerate_pdf, running_transcript)
-                except Exception as e:
-                    print(f"APPEND_ERROR: {pair['id']} -> {e}")
-                finally:
-                    buffer.mark_completed(pair["id"])
+                for pair in ready_pairs:
+                    buffer.mark_processing(pair["id"])
+                    
+                    try:
+                        async with transcript_lock:
+                            running_transcript.append(pair)
+                            print(f"📄 APPENDED: {pair['id']} (seq: {pair['sequence_number']}) -> size: {len(running_transcript)}")
+                    except Exception as e:
+                        print(f"APPEND_ERROR: {pair['id']} -> {e}")
+                    finally:
+                        buffer.mark_completed(pair["id"])
             
             # Check buffer every 100ms
             await asyncio.sleep(0.1)
@@ -423,7 +509,7 @@ async def background_appender(buffer: QAPairBuffer):
 
 @app.websocket("/ws/check")
 async def ws_check(websocket: WebSocket):
-    """Check endpoint with robust fact-checking."""
+    """Check endpoint with robust fact-checking and event handling."""
     await websocket.accept()
     print("WS_CHECK_CONNECTED: Fact-checking endpoint ready")
     
@@ -439,25 +525,53 @@ async def ws_check(websocket: WebSocket):
                 print(f"💥 JSON_ERROR: {e}")
                 continue
 
+            # Handle transcript events
+            if payload.get("type") == "start_transcript":
+                result = await start_transcript_session()
+                await websocket.send_text(json.dumps({
+                    "type": "transcript_event",
+                    "event": "start_transcript",
+                    **result
+                }))
+                continue
+                
+            elif payload.get("type") == "end_transcript":
+                result = await end_transcript_session()
+                await websocket.send_text(json.dumps({
+                    "type": "transcript_event",
+                    "event": "end_transcript",
+                    **result
+                }))
+                continue
+
+            # Handle regular word processing (only during active sessions)
             word = payload.get("word", "").strip()
             if not word:
                 continue
             
-            # Add word to buffer
-            ready_pairs = buffer.add_word(word)
-            
-            # Send stats periodically
-            if len(buffer.word_buffer) % 25 == 0:
-                stats = buffer.get_stats()
-                word_ack = {
-                    "type": "word_ack",
-                    "words_processed": stats["total_words"],
-                    "buffer_size": stats["buffer_size"],
-                    "states": stats["states"],
-                    "current_q": stats["current_question"],
-                    "current_a": stats["current_answer"]
-                }
-                await websocket.send_text(json.dumps(word_ack))
+            # Only process words during active transcript sessions
+            if transcript_session_active:
+                # Add word to buffer
+                ready_pairs = buffer.add_word(word)
+                
+                # Send stats periodically
+                if len(buffer.word_buffer) % 25 == 0:
+                    stats = buffer.get_stats()
+                    await websocket.send_text(json.dumps({
+                        "type": "word_ack",
+                        "words_processed": stats["total_words"],
+                        "buffer_size": stats["buffer_size"],
+                        "states": stats["states"],
+                        "current_q": stats["current_question"],
+                        "current_a": stats["current_answer"],
+                        "session_active": transcript_session_active
+                    }))
+            else:
+                # Send warning if trying to process words outside session
+                await websocket.send_text(json.dumps({
+                    "type": "warning",
+                    "message": "No active transcript session - start a session first"
+                }))
 
     except WebSocketDisconnect:
         print("WS_CHECK_DISCONNECTED")
@@ -468,7 +582,7 @@ async def ws_check(websocket: WebSocket):
 
 @app.websocket("/ws/append")
 async def ws_append(websocket: WebSocket):
-    """Append endpoint for transcript building."""
+    """Append endpoint for transcript building with event handling."""
     await websocket.accept()
     print("WS_APPEND_CONNECTED: Transcript building ready")
     
@@ -484,24 +598,51 @@ async def ws_append(websocket: WebSocket):
                 print(f"💥 JSON_ERROR: {e}")
                 continue
 
+            # Handle transcript events
+            if payload.get("type") == "start_transcript":
+                result = await start_transcript_session()
+                await websocket.send_text(json.dumps({
+                    "type": "transcript_event",
+                    "event": "start_transcript",
+                    **result
+                }))
+                continue
+                
+            elif payload.get("type") == "end_transcript":
+                result = await end_transcript_session()
+                await websocket.send_text(json.dumps({
+                    "type": "transcript_event",
+                    "event": "end_transcript",
+                    **result
+                }))
+                continue
+
+            # Handle regular word processing (only during active sessions)
             word = payload.get("word", "").strip()
             if not word:
                 continue
             
-            # Add word to buffer
-            ready_pairs = buffer.add_word(word)
-            
-            # Send stats periodically (no fact-check results)
-            if len(buffer.word_buffer) % 25 == 0:
-                stats = buffer.get_stats()
-                word_ack = {
-                    "type": "word_ack",
-                    "words_processed": stats["total_words"],
-                    "buffer_size": stats["buffer_size"],
-                    "states": stats["states"],
-                    "transcript_size": len(running_transcript)
-                }
-                await websocket.send_text(json.dumps(word_ack))
+            # Only process words during active transcript sessions
+            if transcript_session_active:
+                # Add word to buffer
+                ready_pairs = buffer.add_word(word)
+                
+                # Send stats periodically (no fact-check results)
+                if len(buffer.word_buffer) % 25 == 0:
+                    stats = buffer.get_stats()
+                    await websocket.send_text(json.dumps({
+                        "type": "word_ack",
+                        "words_processed": stats["total_words"],
+                        "buffer_size": stats["buffer_size"],
+                        "transcript_size": len(running_transcript),
+                        "session_active": transcript_session_active
+                    }))
+            else:
+                # Send warning if trying to process words outside session
+                await websocket.send_text(json.dumps({
+                    "type": "warning",
+                    "message": "No active transcript session - start a session first"
+                }))
 
     except WebSocketDisconnect:
         print("WS_APPEND_DISCONNECTED")
@@ -512,11 +653,28 @@ async def ws_append(websocket: WebSocket):
 
 @app.get("/status")
 async def get_status():
+    session_status = await get_transcript_session_status()
     return {
         "status": "running",
         "transcript_size": len(running_transcript),
-        "global_sequence": global_sequence_counter
+        "global_sequence": global_sequence_counter,
+        **session_status
     }
+
+@app.post("/start_transcript")
+async def start_transcript():
+    """Start a new transcript session via REST API."""
+    return await start_transcript_session()
+
+@app.post("/end_transcript")
+async def end_transcript():
+    """End the current transcript session via REST API."""
+    return await end_transcript_session()
+
+@app.get("/transcript_status")
+async def get_transcript_status():
+    """Get current transcript session status via REST API."""
+    return await get_transcript_session_status()
 
 @app.post("/clear")
 async def clear_all():

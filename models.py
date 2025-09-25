@@ -4,7 +4,7 @@ Defines structured output models for LLM response validation.
 """
 
 from pydantic import BaseModel, Field
-from typing import Literal
+from typing import Literal, Optional
 
 
 class ClaimCheckResponse(BaseModel):
@@ -19,7 +19,7 @@ class ClaimCheckResponse(BaseModel):
         ge=0, le=100,
         description="Confidence score from 0-100"
     )
-    explanation: str = Field(
-        min_length=1,
+    explanation: Optional[str] = Field(
+        default="No explanation available",
         description="Detailed explanation of the verdict and reasoning"
     )

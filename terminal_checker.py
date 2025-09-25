@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
 """
 Terminal-based claim checker for deposition analysis.
-Processes the Deposition_Joseph_Nadeau.pdf file and checks claims against it.
+Processes PDF files and checks claims against them.
 """
 
 import os
 import sys
+import argparse
 
 # Fix HuggingFace tokenizers parallelism warning
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
@@ -20,7 +21,7 @@ from chroma_utils import (
 from claim_checker import check_claim_with_ollama_chain
 
 # Configuration
-PDF_FILE = "Deposition_Joseph_Nadeau.pdf"
+DEFAULT_PDF_FILE = "Deposition_Joseph_Nadeau.pdf"
 CHROMA_PERSIST_DIR = "./chroma_db_second_chair"
 COLLECTION_NAME = "second_chair_depositions"
 CHUNK_SIZE = 1000  # Target chunk size in characters
@@ -34,22 +35,26 @@ def clear_database():
         shutil.rmtree(CHROMA_PERSIST_DIR)
         print("Database cleared!")
 
-def setup_database(force_rebuild=False):
+def setup_database(pdf_file=None, force_rebuild=False):
     """Extract PDF, chunk it, and store in Chroma database."""
     print("Setting up database...")
+    
+    # Use provided PDF file or default
+    if pdf_file is None:
+        pdf_file = DEFAULT_PDF_FILE
     
     if force_rebuild:
         clear_database()
     
-    if not os.path.exists(PDF_FILE):
-        print(f"Error: PDF file '{PDF_FILE}' not found!")
+    if not os.path.exists(pdf_file):
+        print(f"Error: PDF file '{pdf_file}' not found!")
         return False
     
-    print(f"Processing {PDF_FILE}...")
+    print(f"Processing {pdf_file}...")
     
     # Extract and process PDF directly into chunks
     print("  - Processing PDF and creating chunks...")
-    chunks = process_pdf(PDF_FILE, chunk_size=CHUNK_SIZE, overlap=CHUNK_OVERLAP)
+    chunks = process_pdf(pdf_file, chunk_size=CHUNK_SIZE, overlap=CHUNK_OVERLAP)
     print(f"    Created {len(chunks)} chunks")
     
     # Calculate chunk statistics
@@ -92,13 +97,13 @@ def setup_database(force_rebuild=False):
     print("  - Storing in Chroma database...")
     try:
         chroma_client = create_chroma_client(CHROMA_PERSIST_DIR)
-        upsert_chunks_to_chroma(chroma_client, COLLECTION_NAME, chunks, embedder, PDF_FILE, verbose=True)
+        upsert_chunks_to_chroma(chroma_client, COLLECTION_NAME, chunks, embedder, pdf_file, verbose=True)
     except Exception as e:
         print(f"Database error: {e}")
         print("Clearing database and retrying...")
         clear_database()
         chroma_client = create_chroma_client(CHROMA_PERSIST_DIR)
-        upsert_chunks_to_chroma(chroma_client, COLLECTION_NAME, chunks, embedder, PDF_FILE, verbose=True)
+        upsert_chunks_to_chroma(chroma_client, COLLECTION_NAME, chunks, embedder, pdf_file, verbose=True)
     
     print("Database setup complete!")
     return chroma_client, embedder
@@ -149,13 +154,26 @@ def check_claim(chroma_client, embedder, statement, top_k=5, model="phi3:mini"):
 
 def main():
     """Main function to run the terminal claim checker."""
+    # Parse command line arguments
+    parser = argparse.ArgumentParser(description='Second Chair - Terminal Claim Checker')
+    parser.add_argument('--pdf', '-p', type=str, default=DEFAULT_PDF_FILE,
+                       help=f'Path to PDF file to process (default: {DEFAULT_PDF_FILE})')
+    parser.add_argument('--force-rebuild', '-f', action='store_true',
+                       help='Force rebuild the database even if it exists')
+    
+    args = parser.parse_args()
+    
     print("Second Chair - Terminal Claim Checker")
     print("=" * 50)
+    print(f"PDF file: {args.pdf}")
     
     # Check if database exists, if not create it
-    if not os.path.exists(CHROMA_PERSIST_DIR):
-        print("Database not found. Setting up...")
-        result = setup_database()
+    if not os.path.exists(CHROMA_PERSIST_DIR) or args.force_rebuild:
+        if args.force_rebuild:
+            print("Force rebuild requested. Setting up database...")
+        else:
+            print("Database not found. Setting up...")
+        result = setup_database(pdf_file=args.pdf, force_rebuild=args.force_rebuild)
         if not result:
             return
         chroma_client, embedder = result
@@ -168,7 +186,7 @@ def main():
         except Exception as e:
             print(f"Error loading database: {e}")
             print("Recreating database...")
-            result = setup_database()
+            result = setup_database(pdf_file=args.pdf)
             if not result:
                 return
             chroma_client, embedder = result
@@ -176,6 +194,7 @@ def main():
     # Interactive loop
     print("\nReady to check claims!")
     print("Commands: 'quit'/'exit' to stop, 'setup' to rebuild database, 'clear' to clear database")
+    print(f"Current PDF: {args.pdf}")
     
     while True:
         try:
@@ -187,7 +206,7 @@ def main():
                 break
             
             if statement.lower() == 'setup':
-                result = setup_database(force_rebuild=True)
+                result = setup_database(pdf_file=args.pdf, force_rebuild=True)
                 if result:
                     chroma_client, embedder = result
                 continue
