@@ -411,42 +411,77 @@ async def process_pair_with_fact_check(pair: Dict[str, Any], websocket: WebSocke
         
         processing_time = int((time.time() - start_time) * 1000)
         
-        # Handle Pydantic object properly
-        verdict = verdict_response.verdict if hasattr(verdict_response, 'verdict') else "UNKNOWN"
-        confidence = verdict_response.confidence if hasattr(verdict_response, 'confidence') else 0
-        explanation = verdict_response.explanation if hasattr(verdict_response, 'explanation') else "No explanation available"
-        
-        result = {
-            "type": "fact_check_result",
-            "pair_id": pair_id,
-            "sequence_number": pair["sequence_number"],
-            "verdict": verdict,
-            "confidence": confidence,
-            "explanation": explanation,
-            "question": pair["question"],
-            "answer": pair["answer"],
-            "evidence_count": len(hits),
-            "processing_time_ms": processing_time,
-            "timestamp": datetime.utcnow().isoformat()
-        }
-        
-        # Send result back
-        if websocket.client_state.name == 'CONNECTED':
-            await websocket.send_text(json.dumps(result))
-            verdict_emoji = "✅" if verdict == "SUPPORT" else "❌" if verdict == "REFUTE" else "❓"
-            print(f"{verdict_emoji} RESULT: {pair_id} -> {verdict} ({confidence}%) in {processing_time}ms")
+        # Enhanced error handling for claim checker response
+        try:
+            # Handle Pydantic object properly with validation
+            if not hasattr(verdict_response, 'verdict'):
+                print(f"⚠️ WARNING: {pair_id} - Invalid verdict_response object, skipping")
+                return
+            
+            verdict = verdict_response.verdict
+            confidence = getattr(verdict_response, 'confidence', 0)
+            explanation = getattr(verdict_response, 'explanation', "No explanation available")
+            
+            # Validate verdict is a string and not empty
+            if not isinstance(verdict, str) or not verdict.strip():
+                print(f"⚠️ WARNING: {pair_id} - Invalid verdict '{verdict}', skipping")
+                return
+            
+            # Validate confidence is a number
+            try:
+                confidence = int(confidence) if confidence is not None else 0
+                if not (0 <= confidence <= 100):
+                    print(f"⚠️ WARNING: {pair_id} - Invalid confidence {confidence}, using 0")
+                    confidence = 0
+            except (ValueError, TypeError):
+                print(f"⚠️ WARNING: {pair_id} - Invalid confidence type, using 0")
+                confidence = 0
+            
+            # Validate explanation is a string
+            if not isinstance(explanation, str):
+                explanation = str(explanation) if explanation is not None else "No explanation available"
+            
+            result = {
+                "type": "fact_check_result",
+                "pair_id": pair_id,
+                "sequence_number": pair["sequence_number"],
+                "verdict": verdict,
+                "confidence": confidence,
+                "explanation": explanation,
+                "question": pair["question"],
+                "answer": pair["answer"],
+                "evidence_count": len(hits),
+                "processing_time_ms": processing_time,
+                "timestamp": datetime.utcnow().isoformat()
+            }
+            
+            # Validate result JSON before sending
+            try:
+                json.dumps(result)  # Test if result can be serialized
+            except (TypeError, ValueError) as json_error:
+                print(f"⚠️ WARNING: {pair_id} - JSON serialization error: {json_error}, skipping")
+                return
+            
+            # Send result back only if WebSocket is connected and result is valid
+            if websocket.client_state.name == 'CONNECTED':
+                try:
+                    await websocket.send_text(json.dumps(result))
+                    verdict_emoji = "✅" if verdict == "SUPPORT" else "❌" if verdict == "REFUTE" else "❓"
+                    print(f"{verdict_emoji} RESULT: {pair_id} -> {verdict} ({confidence}%) in {processing_time}ms")
+                except Exception as send_error:
+                    print(f"⚠️ WARNING: {pair_id} - Error sending result: {send_error}")
+                    return
+            else:
+                print(f"⚠️ WARNING: {pair_id} - WebSocket not connected, skipping send")
+                
+        except Exception as parsing_error:
+            print(f"⚠️ WARNING: {pair_id} - Error parsing claim checker response: {parsing_error}, skipping")
+            return
         
     except Exception as e:
-        error_result = {
-            "type": "fact_check_error",
-            "pair_id": pair_id,
-            "sequence_number": pair["sequence_number"],
-            "error": str(e),
-            "timestamp": datetime.utcnow().isoformat()
-        }
+        # Only log the error, don't send it to frontend
         print(f"💥 ERROR: {pair_id} -> {e}")
-        if websocket.client_state.name == 'CONNECTED':
-            await websocket.send_text(json.dumps(error_result))
+        # Continue processing without sending error to frontend
 
 async def background_fact_checker(buffer: QAPairBuffer, websocket: WebSocket):
     """Background worker - processes ready pairs one by one during active sessions."""
@@ -521,27 +556,42 @@ async def ws_check(websocket: WebSocket):
             msg = await websocket.receive_text()
             try:
                 payload = json.loads(msg)
-            except Exception as e:
-                print(f"💥 JSON_ERROR: {e}")
+            except (json.JSONDecodeError, ValueError, TypeError) as e:
+                print(f"⚠️ WARNING: Invalid JSON received: {e}")
+                print(f"   Raw message: {msg[:100]}{'...' if len(msg) > 100 else ''}")
                 continue
 
-            # Handle transcript events
-            if payload.get("type") == "start_transcript":
-                result = await start_transcript_session()
-                await websocket.send_text(json.dumps({
-                    "type": "transcript_event",
-                    "event": "start_transcript",
-                    **result
-                }))
+            # Handle transcript events with error handling
+            if payload.get("type") == "transcript.start":
+                try:
+                    result = await start_transcript_session()
+                    response = {
+                        "type": "transcript_event",
+                        "event": "start_transcript",
+                        **result
+                    }
+                    # Validate response JSON before sending
+                    json.dumps(response)  # Test serialization
+                    await websocket.send_text(json.dumps(response))
+                except Exception as e:
+                    print(f"⚠️ WARNING: Error handling transcript.start: {e}")
+                    continue
                 continue
                 
-            elif payload.get("type") == "end_transcript":
-                result = await end_transcript_session()
-                await websocket.send_text(json.dumps({
-                    "type": "transcript_event",
-                    "event": "end_transcript",
-                    **result
-                }))
+            elif payload.get("type") == "transcript.end":
+                try:
+                    result = await end_transcript_session()
+                    response = {
+                        "type": "transcript_event",
+                        "event": "end_transcript",
+                        **result
+                    }
+                    # Validate response JSON before sending
+                    json.dumps(response)  # Test serialization
+                    await websocket.send_text(json.dumps(response))
+                except Exception as e:
+                    print(f"⚠️ WARNING: Error handling transcript.end: {e}")
+                    continue
                 continue
 
             # Handle regular word processing (only during active sessions)
@@ -554,24 +604,38 @@ async def ws_check(websocket: WebSocket):
                 # Add word to buffer
                 ready_pairs = buffer.add_word(word)
                 
-                # Send stats periodically
+                # Send stats periodically with error handling
                 if len(buffer.word_buffer) % 25 == 0:
-                    stats = buffer.get_stats()
-                    await websocket.send_text(json.dumps({
-                        "type": "word_ack",
-                        "words_processed": stats["total_words"],
-                        "buffer_size": stats["buffer_size"],
-                        "states": stats["states"],
-                        "current_q": stats["current_question"],
-                        "current_a": stats["current_answer"],
-                        "session_active": transcript_session_active
-                    }))
+                    try:
+                        stats = buffer.get_stats()
+                        response = {
+                            "type": "word_ack",
+                            "words_processed": stats["total_words"],
+                            "buffer_size": stats["buffer_size"],
+                            "states": stats["states"],
+                            "current_q": stats["current_question"],
+                            "current_a": stats["current_answer"],
+                            "session_active": transcript_session_active
+                        }
+                        # Validate response JSON before sending
+                        json.dumps(response)  # Test serialization
+                        await websocket.send_text(json.dumps(response))
+                    except Exception as e:
+                        print(f"⚠️ WARNING: Error sending stats: {e}")
+                        continue
             else:
                 # Send warning if trying to process words outside session
-                await websocket.send_text(json.dumps({
-                    "type": "warning",
-                    "message": "No active transcript session - start a session first"
-                }))
+                try:
+                    response = {
+                        "type": "warning",
+                        "message": "No active transcript session - start a session first"
+                    }
+                    # Validate response JSON before sending
+                    json.dumps(response)  # Test serialization
+                    await websocket.send_text(json.dumps(response))
+                except Exception as e:
+                    print(f"⚠️ WARNING: Error sending warning: {e}")
+                    continue
 
     except WebSocketDisconnect:
         print("WS_CHECK_DISCONNECTED")
@@ -594,27 +658,42 @@ async def ws_append(websocket: WebSocket):
             msg = await websocket.receive_text()
             try:
                 payload = json.loads(msg)
-            except Exception as e:
-                print(f"💥 JSON_ERROR: {e}")
+            except (json.JSONDecodeError, ValueError, TypeError) as e:
+                print(f"⚠️ WARNING: Invalid JSON received: {e}")
+                print(f"   Raw message: {msg[:100]}{'...' if len(msg) > 100 else ''}")
                 continue
 
-            # Handle transcript events
-            if payload.get("type") == "start_transcript":
-                result = await start_transcript_session()
-                await websocket.send_text(json.dumps({
-                    "type": "transcript_event",
-                    "event": "start_transcript",
-                    **result
-                }))
+            # Handle transcript events with error handling
+            if payload.get("type") == "transcript.start":
+                try:
+                    result = await start_transcript_session()
+                    response = {
+                        "type": "transcript_event",
+                        "event": "start_transcript",
+                        **result
+                    }
+                    # Validate response JSON before sending
+                    json.dumps(response)  # Test serialization
+                    await websocket.send_text(json.dumps(response))
+                except Exception as e:
+                    print(f"⚠️ WARNING: Error handling transcript.start: {e}")
+                    continue
                 continue
                 
-            elif payload.get("type") == "end_transcript":
-                result = await end_transcript_session()
-                await websocket.send_text(json.dumps({
-                    "type": "transcript_event",
-                    "event": "end_transcript",
-                    **result
-                }))
+            elif payload.get("type") == "transcript.end":
+                try:
+                    result = await end_transcript_session()
+                    response = {
+                        "type": "transcript_event",
+                        "event": "end_transcript",
+                        **result
+                    }
+                    # Validate response JSON before sending
+                    json.dumps(response)  # Test serialization
+                    await websocket.send_text(json.dumps(response))
+                except Exception as e:
+                    print(f"⚠️ WARNING: Error handling transcript.end: {e}")
+                    continue
                 continue
 
             # Handle regular word processing (only during active sessions)
@@ -639,10 +718,17 @@ async def ws_append(websocket: WebSocket):
                     }))
             else:
                 # Send warning if trying to process words outside session
-                await websocket.send_text(json.dumps({
-                    "type": "warning",
-                    "message": "No active transcript session - start a session first"
-                }))
+                try:
+                    response = {
+                        "type": "warning",
+                        "message": "No active transcript session - start a session first"
+                    }
+                    # Validate response JSON before sending
+                    json.dumps(response)  # Test serialization
+                    await websocket.send_text(json.dumps(response))
+                except Exception as e:
+                    print(f"⚠️ WARNING: Error sending warning: {e}")
+                    continue
 
     except WebSocketDisconnect:
         print("WS_APPEND_DISCONNECTED")
