@@ -6,6 +6,6 @@ Create a Virual environemnt using
   -source <name of your env>/bin/activate for linux and mac users
   -.\<name of your env>\Scripts\activate.bat for windows users
 Install requirements using "pip install -r requirements.txt"
-Run server using "uvicorn ws_server:app --host 0.0.0.0 --port 8002 --reload --log-level info" {change port name as required}
+Run server using "uvicorn ws_server_clean:app --host 0.0.0.0 --port 8002 --reload --log-level info" {change port name as required}
 
 

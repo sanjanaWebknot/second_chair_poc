@@ -19,7 +19,7 @@ class ClaimCheckResponse(BaseModel):
         ge=0, le=100,
         description="Confidence score from 0-100"
     )
-    explanation: Optional[str] = Field(
+    explanation: str = Field(
         default="No explanation available",
         description="Detailed explanation of the verdict and reasoning"
     )
