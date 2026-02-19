@@ -123,8 +123,9 @@ def extract_qna_chunks(text: str) -> List[Dict]:
         if not line:
             continue
 
-        # Check if this line starts with "Q." (with or without content)
-        if line.startswith("Q."):
+        # Check if this line starts with "Q." (handle optional line numbers)
+        q_match = re.match(r'^(\d+\s+)?Q\.(.*)', line)
+        if q_match:
             # Save previous Q&A pair if we have both
             if current_q.strip() and current_a.strip():
                 qna_pairs.append(
@@ -138,17 +139,18 @@ def extract_qna_chunks(text: str) -> List[Dict]:
                 )
 
             # Start new question - extract content after "Q."
-            question_content = line[2:].strip()  # Remove "Q." and get content
+            question_content = q_match.group(2).strip()
             current_q = question_content
             current_a = ""
             current_q_line = line_num + 1
             current_a_line = None
             mode = "q"
 
-        # Check if this line starts with "A." (with or without content)
-        elif line.startswith("A."):
+        # Check if this line starts with "A." (handle optional line numbers)
+        elif re.match(r'^(\d+\s+)?A\.(.*)', line):
+            a_match = re.match(r'^(\d+\s+)?A\.(.*)', line)
             # Extract content after "A."
-            answer_content = line[2:].strip()  # Remove "A." and get content
+            answer_content = a_match.group(2).strip()
             current_a = answer_content
             current_a_line = line_num + 1
             mode = "a"

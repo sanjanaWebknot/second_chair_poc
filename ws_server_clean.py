@@ -439,9 +439,9 @@ async def process_pair_with_fact_check(pair: Dict[str, Any], websocket: WebSocke
     print(f"🔄 PROCESSING: {pair_id} (seq: {pair['sequence_number']})")
 
     try:
-        # Add to Chroma
+        # Create temporary chunk for retrieval (but don't add to Chroma per user request)
         chunk = make_chunk_from_pair(pair)
-        await asyncio.to_thread(add_chunk_to_chroma, chunk)
+        # await asyncio.to_thread(add_chunk_to_chroma, chunk)
 
         # Get similar chunks
         hits = await asyncio.to_thread(retrieve_top_k_sync, chunk["clean_text"], TOP_K)
